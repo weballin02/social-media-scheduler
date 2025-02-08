@@ -1,5 +1,5 @@
 """
-Local Social Media Content Generator with Monetization and Immediate Send Functionality
+Local Social Media Content Generator with Monetization, Immediate Send, and One-Click Login
 
 Features:
   • Local user registration and login (using JSON files)
@@ -14,7 +14,8 @@ Features:
          - Pro: $19.99/month (acts as a decoy to make Premium more attractive)
   • Global TEST_MODE flag to simulate external calls (no real payment or posting) during testing
   • "Send Now" functionality for scheduled posts
-
+  • **One-Click Login:** After a successful login, the app immediately refreshes to show the dashboard.
+  
 Note: Replace all placeholder API keys (e.g. Stripe secret key) with your production values.
 """
 
@@ -773,7 +774,8 @@ def login_user():
             st.error("Please provide both email and password!")
             logger.warning("Login attempted with missing email or password.")
         else:
-            login_user_local(email, password)
+            if login_user_local(email, password):
+                rerun_app()  # Immediately refresh the app after successful login
 
 # ----------------------------- Main Application Logic -----------------------------
 def main():
