@@ -215,14 +215,14 @@ if username:
             with col2:
                 if st.button("Remove", key=f"remove_{name}"):
                     remove_user_rss_feed(username, name)
-                    st.experimental_rerun()
+                    st.rerun()
 
     st.write("➕ Save a High-Ranking RSS Feed")
     selected_top_feed = st.selectbox("Choose a Feed to Save", ["Select"] + list(TOP_RSS_FEEDS.keys()))
     if selected_top_feed != "Select" and st.button("Save Selected Feed"):
         if save_user_rss_feed(username, selected_top_feed, TOP_RSS_FEEDS[selected_top_feed]):
             st.success("✅ RSS Feed added successfully!")
-            st.experimental_rerun()
+            st.rerun()
 
     st.write("➕ Add a Custom RSS Feed")
     new_feed_name = st.text_input("Feed Name:", key="new_feed_name")
@@ -231,7 +231,7 @@ if username:
         if new_feed_name and new_feed_url:
             if save_user_rss_feed(username, new_feed_name, new_feed_url):
                 st.success("✅ Custom RSS Feed added successfully!")
-                st.experimental_rerun()
+                st.rerun()
         else:
             st.warning("Please provide both a feed name and URL.")
 
