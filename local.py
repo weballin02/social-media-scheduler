@@ -28,9 +28,7 @@ from instagrapi import Client
 def rerun_app():
     """
     Force the app to rerun.
-    Tries st.rerun() first (available in newer versions),
-    falls back to st.experimental_rerun() if available,
-    and otherwise instructs the user to refresh manually.
+    Tries st.rerun() first, falls back to st.experimental_rerun() if available, or asks the user to refresh.
     """
     if hasattr(st, "rerun"):
         st.rerun()
@@ -40,12 +38,9 @@ def rerun_app():
         st.info("Please refresh the page to see the update.")
 
 # -------------------- CONFIGURATION --------------------
-
-# File paths for local storage
 RSS_FEEDS_FILE = "user_rss_feeds.json"
 POSTS_FILE = "scheduled_posts.json"
 
-# Predefined high-ranking RSS feeds
 TOP_RSS_FEEDS = {
     "BBC News": "http://feeds.bbci.co.uk/news/rss.xml",
     "CNN": "http://rss.cnn.com/rss/cnn_topstories.rss",
@@ -88,26 +83,23 @@ try:
 except Exception as e:
     st.sidebar.error(f"Error initializing Twitter API: {e}")
 
-# Initialize Instagram client using credentials from the UI, with 2FA handling
+# -------------------- Simplified Instagram Login --------------------
 ig_client = Client()
+session_dir = "sessions"
+if not os.path.exists(session_dir):
+    os.makedirs(session_dir)
+session_file = os.path.join(session_dir, f"{insta_username}.json")
 try:
-    ig_client.login(insta_username, insta_password)
-    st.sidebar.success("Instagram API initialized.")
-except Exception as e:
-    error_message = str(e).lower()
-    if "two factor" in error_message or "challenge" in error_message:
-        st.sidebar.warning("Instagram requires a verification code. Check your email and enter it below.")
-        verification_code = st.sidebar.text_input("Enter Instagram Verification Code", value="", key="insta_verification")
-        if verification_code:
-            try:
-                ig_client.login(insta_username, insta_password, verification_code=verification_code)
-                st.sidebar.success("Instagram API initialized with verification code.")
-            except Exception as e2:
-                st.sidebar.error(f"Instagram login failed even with verification code: {e2}")
-        else:
-            st.sidebar.info("Awaiting verification code input...")
+    if os.path.exists(session_file):
+        ig_client.load_settings(session_file)
+        ig_client.login(insta_username, insta_password)
+        st.sidebar.success("Instagram API initialized using saved session.")
     else:
-        st.sidebar.error(f"Instagram login failed: {e}")
+        ig_client.login(insta_username, insta_password)
+        ig_client.dump_settings(session_file)
+        st.sidebar.success("Instagram API initialized and session saved.")
+except Exception as e:
+    st.sidebar.error(f"Instagram login failed: {e}")
 
 # -------------------- FUNCTION DEFINITIONS --------------------
 def fetch_rss_headlines(feed_url, limit=5):
@@ -226,7 +218,7 @@ username = st.text_input("Enter your username:", value="local")
 
 if username:
     st.success(f"✅ Logged in as **{username}**")
-
+    
     st.subheader("📢 Manage Your RSS Feeds")
     user_feeds = load_user_rss_feeds().get(username, {})
 
