@@ -10,7 +10,7 @@ It features:
     - A background scheduler (daemon thread) to process scheduled posts.
 
 Requirements:
-    pip install streamlit feedparser tweepy instagrapi
+    pip install -r requirements.txt
 """
 
 import os
@@ -23,6 +23,21 @@ import streamlit as st
 import feedparser
 import tweepy
 from instagrapi import Client
+
+# -------------------- Helper Function for Rerun --------------------
+def rerun_app():
+    """
+    Force the app to rerun.
+    Tries st.rerun() first (available in newer versions),
+    falls back to st.experimental_rerun() if available,
+    and otherwise instructs the user to refresh manually.
+    """
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    else:
+        st.info("Please refresh the page to see the update.")
 
 # -------------------- CONFIGURATION --------------------
 
@@ -56,7 +71,6 @@ insta_password = st.sidebar.text_input("Instagram Password", value="your_instagr
 DEFAULT_INSTAGRAM_IMAGE = st.sidebar.text_input("Default Instagram Image", value="default_instagram.jpg")
 
 # -------------------- INITIAL SETUP --------------------
-
 # Ensure storage files exist
 for file_path, initial_data in [
     (RSS_FEEDS_FILE, {}),
@@ -86,6 +100,16 @@ except Exception as e:
 # -------------------- FUNCTION DEFINITIONS --------------------
 
 def fetch_rss_headlines(feed_url, limit=5):
+    """
+    Fetch the latest headlines from an RSS feed.
+
+    Args:
+        feed_url (str): URL of the RSS feed.
+        limit (int): Maximum number of headlines to return.
+
+    Returns:
+        list: A list of headlines, each as a dict with title, summary, and link.
+    """
     try:
         feed = feedparser.parse(feed_url)
         headlines = [
@@ -98,6 +122,12 @@ def fetch_rss_headlines(feed_url, limit=5):
         return []
 
 def load_user_rss_feeds():
+    """
+    Load user RSS feeds from the JSON file.
+
+    Returns:
+        dict: A dictionary containing saved RSS feeds.
+    """
     try:
         with open(RSS_FEEDS_FILE, "r") as file:
             return json.load(file)
@@ -106,6 +136,17 @@ def load_user_rss_feeds():
         return {}
 
 def save_user_rss_feed(username, feed_name, feed_url):
+    """
+    Save a user's custom RSS feed.
+
+    Args:
+        username (str): The user's username.
+        feed_name (str): A name for the RSS feed.
+        feed_url (str): The URL of the RSS feed.
+
+    Returns:
+        bool: True if saved successfully, False otherwise.
+    """
     feeds = load_user_rss_feeds()
     if username not in feeds:
         feeds[username] = {}
@@ -119,6 +160,13 @@ def save_user_rss_feed(username, feed_name, feed_url):
         return False
 
 def remove_user_rss_feed(username, feed_name):
+    """
+    Remove a saved RSS feed.
+
+    Args:
+        username (str): The user's username.
+        feed_name (str): The name of the RSS feed to remove.
+    """
     feeds = load_user_rss_feeds()
     if username in feeds and feed_name in feeds[username]:
         del feeds[username][feed_name]
@@ -129,6 +177,12 @@ def remove_user_rss_feed(username, feed_name):
             st.error(f"Error removing RSS feed: {e}")
 
 def load_scheduled_posts():
+    """
+    Load scheduled posts from the JSON file.
+
+    Returns:
+        list: A list of scheduled posts.
+    """
     try:
         with open(POSTS_FILE, "r") as file:
             return json.load(file)
@@ -137,6 +191,12 @@ def load_scheduled_posts():
         return []
 
 def save_scheduled_posts(posts):
+    """
+    Save scheduled posts to the JSON file.
+
+    Args:
+        posts (list): A list of scheduled posts.
+    """
     try:
         with open(POSTS_FILE, "w") as file:
             json.dump(posts, file, indent=4)
@@ -144,6 +204,17 @@ def save_scheduled_posts(posts):
         st.error(f"Error saving scheduled posts: {e}")
 
 def schedule_social_media_post(username, content, scheduled_time):
+    """
+    Schedule a social media post for future publishing.
+
+    Args:
+        username (str): The user's username.
+        content (str): The post content.
+        scheduled_time (datetime): The time to publish the post.
+
+    Returns:
+        bool: True if scheduled successfully, False otherwise.
+    """
     posts = load_scheduled_posts()
     post = {
         "username": username,
@@ -156,6 +227,12 @@ def schedule_social_media_post(username, content, scheduled_time):
     return True
 
 def post_to_twitter(content):
+    """
+    Publish content to Twitter.
+
+    Args:
+        content (str): The tweet text.
+    """
     try:
         twitter_api.update_status(content)
         st.info("Posted to Twitter successfully.")
@@ -163,6 +240,13 @@ def post_to_twitter(content):
         st.error(f"Twitter posting failed: {e}")
 
 def post_to_instagram(content, image_path=DEFAULT_INSTAGRAM_IMAGE):
+    """
+    Publish content to Instagram using a default image.
+
+    Args:
+        content (str): The caption for the Instagram post.
+        image_path (str): Path to the image file.
+    """
     if not os.path.exists(image_path):
         st.error("Default Instagram image not found. Cannot post to Instagram.")
         return
@@ -173,6 +257,10 @@ def post_to_instagram(content, image_path=DEFAULT_INSTAGRAM_IMAGE):
         st.error(f"Instagram posting failed: {e}")
 
 def process_scheduled_posts():
+    """
+    Background task that processes scheduled posts and publishes them when due.
+    Runs indefinitely in a daemon thread.
+    """
     while True:
         posts = load_scheduled_posts()
         updated = False
