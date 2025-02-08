@@ -71,7 +71,6 @@ insta_password = st.sidebar.text_input("Instagram Password", value="your_instagr
 DEFAULT_INSTAGRAM_IMAGE = st.sidebar.text_input("Default Instagram Image", value="default_instagram.jpg")
 
 # -------------------- INITIAL SETUP --------------------
-# Ensure storage files exist
 for file_path, initial_data in [
     (RSS_FEEDS_FILE, {}),
     (POSTS_FILE, []),
@@ -80,7 +79,7 @@ for file_path, initial_data in [
         with open(file_path, "w") as f:
             json.dump(initial_data, f)
 
-# Initialize Twitter API client
+# Initialize Twitter API client using credentials from the UI
 try:
     auth = tweepy.OAuthHandler(twitter_api_key, twitter_api_secret)
     auth.set_access_token(twitter_access_token, twitter_access_secret)
@@ -89,27 +88,29 @@ try:
 except Exception as e:
     st.sidebar.error(f"Error initializing Twitter API: {e}")
 
-# Initialize Instagram client
+# Initialize Instagram client using credentials from the UI, with 2FA handling
 ig_client = Client()
 try:
     ig_client.login(insta_username, insta_password)
     st.sidebar.success("Instagram API initialized.")
 except Exception as e:
-    st.sidebar.warning(f"Instagram login failed: {e}")
+    error_message = str(e).lower()
+    if "two factor" in error_message or "challenge" in error_message:
+        st.sidebar.warning("Instagram requires a verification code. Check your email and enter it below.")
+        verification_code = st.sidebar.text_input("Enter Instagram Verification Code", value="", key="insta_verification")
+        if verification_code:
+            try:
+                ig_client.login(insta_username, insta_password, verification_code=verification_code)
+                st.sidebar.success("Instagram API initialized with verification code.")
+            except Exception as e2:
+                st.sidebar.error(f"Instagram login failed even with verification code: {e2}")
+        else:
+            st.sidebar.info("Awaiting verification code input...")
+    else:
+        st.sidebar.error(f"Instagram login failed: {e}")
 
 # -------------------- FUNCTION DEFINITIONS --------------------
-
 def fetch_rss_headlines(feed_url, limit=5):
-    """
-    Fetch the latest headlines from an RSS feed.
-
-    Args:
-        feed_url (str): URL of the RSS feed.
-        limit (int): Maximum number of headlines to return.
-
-    Returns:
-        list: A list of headlines, each as a dict with title, summary, and link.
-    """
     try:
         feed = feedparser.parse(feed_url)
         headlines = [
@@ -122,12 +123,6 @@ def fetch_rss_headlines(feed_url, limit=5):
         return []
 
 def load_user_rss_feeds():
-    """
-    Load user RSS feeds from the JSON file.
-
-    Returns:
-        dict: A dictionary containing saved RSS feeds.
-    """
     try:
         with open(RSS_FEEDS_FILE, "r") as file:
             return json.load(file)
@@ -136,17 +131,6 @@ def load_user_rss_feeds():
         return {}
 
 def save_user_rss_feed(username, feed_name, feed_url):
-    """
-    Save a user's custom RSS feed.
-
-    Args:
-        username (str): The user's username.
-        feed_name (str): A name for the RSS feed.
-        feed_url (str): The URL of the RSS feed.
-
-    Returns:
-        bool: True if saved successfully, False otherwise.
-    """
     feeds = load_user_rss_feeds()
     if username not in feeds:
         feeds[username] = {}
@@ -160,13 +144,6 @@ def save_user_rss_feed(username, feed_name, feed_url):
         return False
 
 def remove_user_rss_feed(username, feed_name):
-    """
-    Remove a saved RSS feed.
-
-    Args:
-        username (str): The user's username.
-        feed_name (str): The name of the RSS feed to remove.
-    """
     feeds = load_user_rss_feeds()
     if username in feeds and feed_name in feeds[username]:
         del feeds[username][feed_name]
@@ -177,12 +154,6 @@ def remove_user_rss_feed(username, feed_name):
             st.error(f"Error removing RSS feed: {e}")
 
 def load_scheduled_posts():
-    """
-    Load scheduled posts from the JSON file.
-
-    Returns:
-        list: A list of scheduled posts.
-    """
     try:
         with open(POSTS_FILE, "r") as file:
             return json.load(file)
@@ -191,12 +162,6 @@ def load_scheduled_posts():
         return []
 
 def save_scheduled_posts(posts):
-    """
-    Save scheduled posts to the JSON file.
-
-    Args:
-        posts (list): A list of scheduled posts.
-    """
     try:
         with open(POSTS_FILE, "w") as file:
             json.dump(posts, file, indent=4)
@@ -204,17 +169,6 @@ def save_scheduled_posts(posts):
         st.error(f"Error saving scheduled posts: {e}")
 
 def schedule_social_media_post(username, content, scheduled_time):
-    """
-    Schedule a social media post for future publishing.
-
-    Args:
-        username (str): The user's username.
-        content (str): The post content.
-        scheduled_time (datetime): The time to publish the post.
-
-    Returns:
-        bool: True if scheduled successfully, False otherwise.
-    """
     posts = load_scheduled_posts()
     post = {
         "username": username,
@@ -227,12 +181,6 @@ def schedule_social_media_post(username, content, scheduled_time):
     return True
 
 def post_to_twitter(content):
-    """
-    Publish content to Twitter.
-
-    Args:
-        content (str): The tweet text.
-    """
     try:
         twitter_api.update_status(content)
         st.info("Posted to Twitter successfully.")
@@ -240,13 +188,6 @@ def post_to_twitter(content):
         st.error(f"Twitter posting failed: {e}")
 
 def post_to_instagram(content, image_path=DEFAULT_INSTAGRAM_IMAGE):
-    """
-    Publish content to Instagram using a default image.
-
-    Args:
-        content (str): The caption for the Instagram post.
-        image_path (str): Path to the image file.
-    """
     if not os.path.exists(image_path):
         st.error("Default Instagram image not found. Cannot post to Instagram.")
         return
@@ -257,10 +198,6 @@ def post_to_instagram(content, image_path=DEFAULT_INSTAGRAM_IMAGE):
         st.error(f"Instagram posting failed: {e}")
 
 def process_scheduled_posts():
-    """
-    Background task that processes scheduled posts and publishes them when due.
-    Runs indefinitely in a daemon thread.
-    """
     while True:
         posts = load_scheduled_posts()
         updated = False
@@ -282,7 +219,6 @@ if "scheduler_thread_started" not in st.session_state:
     st.session_state["scheduler_thread_started"] = True
 
 # -------------------- STREAMLIT USER INTERFACE --------------------
-
 st.title("🚀 Social Media Scheduler")
 
 st.subheader("🔑 Login")
