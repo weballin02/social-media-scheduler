@@ -1,12 +1,9 @@
 streamlit
-firebase-admin
 feedparser
-requests
+tweepy
 instagrapi
-selenium
-webdriver-manager
 Pillow
 beautifulsoup4
 APScheduler
 pytz
-tweepy
+requests
