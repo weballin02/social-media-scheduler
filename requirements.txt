@@ -1,0 +1,5 @@
+streamlit>=1.24.0
+feedparser>=6.0.8
+tweepy>=4.14.0
+instagrapi>=1.15.4
+stripe>=4.5.0
