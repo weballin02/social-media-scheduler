@@ -1,23 +1,27 @@
 """
-Local Social Media Content Generator
+Local Social Media Content Generator with Monetization
 
-This is a production-ready, standalone version of the Social Media Scheduler.
-It features:
-  - Local user registration and login (using JSON files for storage).
-  - Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts).
-  - RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow).
-  - Instagram posting using instagrapi with session saving (to avoid manual 2FA prompts).
-  - Scheduling of posts via APScheduler.
-  - A dashboard and separate pages for RSS feeds and Instagram scheduling.
-  - Logging of events.
-
-Requirements: See requirements.txt
+Features:
+  • Local user registration and login (using JSON files)
+  • Local user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
+  • RSS feed functionality with image downloading (feedparser, BeautifulSoup, requests, Pillow)
+  • Instagram posting via instagrapi with session saving (avoiding 2FA hassles)
+  • Post scheduling via APScheduler
+  • A dashboard and separate pages for RSS feeds and Instagram scheduling
+  • Stripe Checkout integration for monetization with optimized pricing tiers:
+       – Free: Limited to 3 RSS feeds and 3 scheduled posts.
+       – Premium: $9.99/month — unlimited features.
+       – Pro: $19.99/month — (acts as a decoy to make Premium more attractive)
+       
+Note: Replace all placeholder API keys (e.g. Stripe secret key) with your actual keys.
 """
 
 import os
 import json
 import time
 import threading
+import atexit
+import logging
 from datetime import datetime
 
 import streamlit as st
@@ -33,22 +37,33 @@ from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import pytz
-import logging
+
+import stripe
 
 # ----------------------------- Logging Configuration -----------------------------
 logging.basicConfig(
-    filename='app.log',  
-    level=logging.INFO,  
-    format='%(asctime)s - %(levelname)s - %(message)s',  
+    filename='app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
 # ----------------------------- Local Storage Files -----------------------------
-USERS_FILE = "users.json"               # stores user credentials and role
-USER_METRICS_FILE = "user_metrics.json"   # stores per-user metrics
-RSS_FEEDS_FILE = "user_rss_feeds.json"      # stores user-saved RSS feeds
-POSTS_FILE = "scheduled_posts.json"         # stores scheduled posts
+USERS_FILE = "users.json"                # Stores user credentials and role
+USER_METRICS_FILE = "user_metrics.json"    # Stores per-user metrics
+RSS_FEEDS_FILE = "user_rss_feeds.json"       # Stores user-saved RSS feeds
+POSTS_FILE = "scheduled_posts.json"          # Stores scheduled posts
+
+# ----------------------------- Pricing Tiers (Psychologically Optimized) -----------------------------
+# We use $9.99 (Premium) and $19.99 (Pro) to create a decoy effect
+PRICING_TIERS = {
+    "Premium": 9.99,
+    "Pro": 19.99
+}
+
+# ----------------------------- Stripe Configuration -----------------------------
+stripe.api_key = "your_stripe_secret_key"  # Replace with your actual Stripe secret key
 
 # ----------------------------- Helper Function for Rerun -----------------------------
 def rerun_app():
@@ -125,6 +140,16 @@ def login_user_local(email, password):
     load_and_schedule_existing_posts(email)
     return True
 
+def upgrade_user_plan(username, plan):
+    users = load_users()
+    if username in users:
+        users[username]["role"] = plan  # Set role to either "Premium" or "Pro"
+        save_users(users)
+        st.session_state.user_role = plan
+        logger.info(f"User {username} upgraded to {plan}")
+    else:
+        st.error("User not found during upgrade.")
+
 # ----------------------------- Local User Metrics Management -----------------------------
 def load_user_metrics():
     if os.path.exists(USER_METRICS_FILE):
@@ -200,6 +225,45 @@ def update_scheduled_post(email, post_id, updated_data):
         save_user_metrics(metrics)
         logger.info(f"Updated scheduled post {post_id} for user {email}: {updated_data}")
 
+# ----------------------------- Stripe Payment Integration -----------------------------
+def create_stripe_checkout_session(username, plan):
+    """Create a Stripe Checkout session for the selected plan."""
+    try:
+        unit_amount = int(PRICING_TIERS[plan] * 100)  # in cents
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {'name': f'{plan} Upgrade'},
+                    'unit_amount': unit_amount,
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=f"http://localhost:8501/?session_id={{CHECKOUT_SESSION_ID}}&username={username}&plan={plan}",
+            cancel_url="http://localhost:8501/?cancel=1",
+        )
+        return session
+    except Exception as e:
+        st.error(f"Error creating Stripe session: {e}")
+        return None
+
+# Payment verification on app load
+query_params = st.experimental_get_query_params()
+if "session_id" in query_params and "username" in query_params and "plan" in query_params:
+    session_id = query_params["session_id"][0]
+    username_param = query_params["username"][0]
+    plan_param = query_params["plan"][0]
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+        if session.payment_status == "paid":
+            upgrade_user_plan(username_param, plan_param)
+            st.success(f"🎉 Upgrade successful! You are now a {plan_param} user.")
+            st.experimental_set_query_params()  # Clear query parameters
+    except Exception as e:
+        st.error(f"Error verifying payment: {e}")
+
 # ----------------------------- APScheduler Initialization -----------------------------
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -211,8 +275,6 @@ def init_scheduler():
     return scheduler
 
 scheduler = init_scheduler()
-# Ensure scheduler shuts down on exit
-import atexit
 atexit.register(lambda: scheduler.shutdown())
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
@@ -275,7 +337,7 @@ def load_and_schedule_existing_posts(email):
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
-    """Fetch headlines (and associated images) from the RSS feed."""
+    """Fetch headlines and associated images from the RSS feed."""
     try:
         feed = feedparser.parse(rss_url)
         headlines = []
@@ -284,33 +346,28 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
             summary = entry.summary if 'summary' in entry else "No summary available."
             link = entry.link
             image_url = None
-
             if 'media_content' in entry:
                 media = entry.media_content
                 if isinstance(media, list) and len(media) > 0:
                     image_url = media[0].get('url')
                     logger.info(f"Found media_content image for {title}")
-
             if not image_url and 'media_thumbnail' in entry:
                 media_thumbnails = entry.media_thumbnail
                 if isinstance(media_thumbnails, list) and len(media_thumbnails) > 0:
                     image_url = media_thumbnails[0].get('url')
                     logger.info(f"Found media_thumbnail image for {title}")
-
             if not image_url and 'enclosures' in entry:
                 for enclosure in entry.enclosures:
                     if enclosure.get('type', '').startswith('image/'):
                         image_url = enclosure.get('url')
                         logger.info(f"Found enclosure image for {title}")
                         break
-
             if not image_url and 'summary' in entry:
                 soup = BeautifulSoup(entry.summary, 'html.parser')
                 img_tag = soup.find('img')
                 if img_tag and img_tag.get('src'):
                     image_url = img_tag.get('src')
                     logger.info(f"Found embedded image in summary for {title}")
-
             image_path = None
             if image_url:
                 image_path = download_image(image_url, image_dir=image_dir)
@@ -320,7 +377,6 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
                     logger.warning(f"Image download failed for {title}")
             else:
                 logger.warning(f"No image found for {title}")
-
             headlines.append({
                 "title": title,
                 "summary": summary,
@@ -512,7 +568,7 @@ def edit_scheduled_post(email, post):
             update_scheduled_post(email, post['id'], updated_data)
             try:
                 scheduler.remove_job(post['id'])
-                logger.info(f"Removed existing job {post['id']} for rescheduling.")
+                logger.info(f"Removed job {post['id']} for rescheduling.")
             except JobLookupError:
                 logger.warning(f"Job {post['id']} not found for removal.")
             add_job(email, post['id'], post['image_path'], updated_caption, new_scheduled_datetime)
@@ -627,7 +683,7 @@ def render_rss_feeds_page():
 
 # ----------------------------- User Interface Rendering -----------------------------
 def render_user_interface():
-    menu = st.sidebar.radio("Navigation", ["Dashboard", "RSS Feeds", "Instagram Scheduler"])
+    menu = st.sidebar.radio("Navigation", ["Dashboard", "RSS Feeds", "Instagram Scheduler", "Upgrade"])
     thresholds = {"rss_headlines_fetched": 10, "instagram_posts_scheduled": 5}
     if menu == "Dashboard":
         metrics = get_user_metrics(st.session_state.user_email)
@@ -636,8 +692,26 @@ def render_user_interface():
         render_rss_feeds_page()
     elif menu == "Instagram Scheduler":
         render_instagram_scheduler_page()
+    elif menu == "Upgrade":
+        render_upgrade_page()
 
-# ----------------------------- Local Authentication Functions -----------------------------
+# ----------------------------- Upgrade Page with Stripe Integration -----------------------------
+def render_upgrade_page():
+    st.header("💰 Upgrade Your Account")
+    st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
+    st.markdown("Choose from our enticing plans:")
+    st.markdown("- **Premium:** $9.99/month (Unlimited features)")
+    st.markdown("- **Pro:** $19.99/month (Unlimited features with priority support)")
+    selected_plan = st.selectbox("Select your plan", list(PRICING_TIERS.keys()))
+    if st.button("Upgrade Now"):
+        session = create_stripe_checkout_session(st.session_state.user_email, selected_plan)
+        if session:
+            st.markdown(f"Please [click here to pay]({session.url}) to complete your upgrade.")
+
+# ----------------------------- RSS Feeds and Instagram Scheduler Helper Functions -----------------------------
+# (The functions fetch_headlines, download_image, etc. are already defined above.)
+
+# ----------------------------- Authentication Functions -----------------------------
 def register_user():
     st.header("Register")
     email = st.text_input("Email")
