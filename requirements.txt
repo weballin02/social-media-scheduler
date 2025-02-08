@@ -9,3 +9,4 @@ Pillow
 beautifulsoup4
 APScheduler
 pytz
+tweepy
