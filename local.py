@@ -1,18 +1,19 @@
 """
-Local Social Media Content Generator with Monetization
+Local Social Media Content Generator with Monetization and Immediate Send Functionality
 
 Features:
-  • Local user registration and login (using JSON files).
-  • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts).
-  • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow).
-  • Instagram posting via instagrapi with session saving (avoiding repeated 2FA prompts).
-  • Twitter posting via tweepy.
-  • Post scheduling via APScheduler.
-  • Dashboard and navigation pages for RSS feeds, Instagram scheduling, and account upgrade.
+  • Local user registration and login (using JSON files)
+  • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
+  • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow)
+  • Instagram posting via instagrapi with session saving (avoiding repeated 2FA prompts)
+  • Twitter posting via tweepy
+  • Post scheduling via APScheduler
+  • A dashboard and separate pages for RSS feeds, Instagram scheduling, and account upgrade
   • Stripe Checkout integration for monetization with two pricing tiers:
          - Premium: $9.99/month (unlimited features)
          - Pro: $19.99/month (acts as a decoy to make Premium more attractive)
-  • Global TEST_MODE flag to simulate external calls (no real payment or posting) during testing.
+  • Global TEST_MODE flag to simulate external calls (no real payment or posting) during testing
+  • **New:** "Send Now" functionality for scheduled posts
 
 Note: Replace all placeholder API keys (e.g. Stripe secret key) with your production values.
 """
@@ -41,11 +42,13 @@ import stripe
 # ----------------------------- Global Configuration -----------------------------
 TEST_MODE = True  # Set to False in production
 
+# Pricing tiers (psychologically optimized)
 PRICING_TIERS = {
     "Premium": 9.99,
     "Pro": 19.99
 }
 
+# Stripe configuration
 stripe.api_key = "your_stripe_secret_key"  # Replace with your actual Stripe secret key
 
 # Local storage file paths
@@ -341,6 +344,34 @@ def load_and_schedule_existing_posts(email):
                 logger.info(f"Post {post_id} scheduled time passed. Uploading immediately.")
                 schedule_instagram_post(email, post_id, image_path, caption, datetime.now(pytz.timezone(timezone)))
 
+def send_post_now(email, post_id):
+    """Immediately send the scheduled post identified by post_id."""
+    metrics = get_user_metrics(email)
+    scheduled_posts = metrics.get("scheduled_posts", [])
+    post = next((p for p in scheduled_posts if p['id'] == post_id), None)
+    if post is None:
+        st.error("Post not found.")
+        return
+    if post.get("posted", False):
+        st.warning("Post already sent.")
+        return
+    if TEST_MODE:
+        st.info("Simulated immediate sending of scheduled post.")
+        logger.info(f"Simulated sending post {post_id} immediately for user {email}.")
+        update_user_metric(email, "instagram_posts_scheduled", 1)
+        remove_scheduled_post(email, post_id)
+        return
+    try:
+        post_to_twitter(post["caption"])
+        post_to_instagram(post["caption"], image_path=post["image_path"])
+        st.success("Post sent immediately!")
+        logger.info(f"Sent post {post_id} immediately for user {email}.")
+        update_user_metric(email, "instagram_posts_scheduled", 1)
+        remove_scheduled_post(email, post_id)
+    except Exception as e:
+        st.error(f"Error sending post immediately: {e}")
+        logger.error(f"Error sending post {post_id} immediately for user {email}: {e}")
+
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
     try:
@@ -522,71 +553,46 @@ def render_instagram_scheduler_page():
                         st.markdown(f"**Article URL:** [Read more]({post['article_url']})")
                     else:
                         st.markdown("**Article URL:** Not available")
-                    col_a, col_b = st.columns(2)
+                    col_a, col_b, col_c = st.columns(3)
                     with col_a:
                         if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
                             edit_scheduled_post(email=st.session_state.user_email, post=post)
                     with col_b:
                         if st.button(f"Delete {post['id']}", key=f"delete_{post['id']}"):
                             delete_scheduled_post(email=st.session_state.user_email, post_id=post['id'])
+                    with col_c:
+                        if st.button(f"Send Now {post['id']}", key=f"send_{post['id']}"):
+                            send_post_now(st.session_state.user_email, post['id'])
     else:
         st.info("No scheduled posts found.")
 
-def edit_scheduled_post(email, post):
-    with st.form(f"edit_form_{post['id']}"):
-        st.header(f"Edit Scheduled Post {post['id']}")
-        original_caption = post['caption']
-        article_url = post.get('article_url', '')
-        if article_url:
-            original_caption = original_caption.replace(f"\nRead more at: {article_url}", '')
-        new_caption = st.text_area("Post Caption", original_caption, key=f"edit_caption_{post['id']}")
-        scheduled_time = datetime.fromisoformat(post['scheduled_time'])
-        timezone = post.get('timezone', 'UTC')
-        col1, col2 = st.columns(2)
-        with col1:
-            new_date = st.date_input("Select Date", scheduled_time.date(), key=f"edit_date_{post['id']}")
-        with col2:
-            new_time = st.time_input("Select Time", scheduled_time.time(), key=f"edit_time_{post['id']}")
-        new_timezone = st.selectbox("Select Timezone", pytz.all_timezones, index=pytz.all_timezones.index(timezone), key=f"edit_timezone_{post['id']}")
-        submitted = st.form_submit_button("Update Post")
-        if submitted:
-            try:
-                new_scheduled_datetime = datetime.combine(new_date, new_time)
-                new_scheduled_datetime = pytz.timezone(new_timezone).localize(new_scheduled_datetime)
-            except Exception as e:
-                st.error(f"Error in scheduling datetime: {e}")
-                logger.error(f"Error updating post '{post['id']}': {e}")
-                return
-            now = datetime.now(pytz.timezone(new_timezone))
-            if new_scheduled_datetime <= now:
-                st.error("Scheduled time must be in the future!")
-                logger.warning(f"User attempted to update post '{post['id']}' to a past time.")
-                return
-            updated_caption = f"{new_caption}\nRead more at: {post['article_url']}" if post.get('article_url') else new_caption
-            updated_data = {
-                "caption": updated_caption,
-                "scheduled_time": new_scheduled_datetime.isoformat(),
-                "timezone": new_timezone
-            }
-            update_scheduled_post(email, post['id'], updated_data)
-            try:
-                scheduler.remove_job(post['id'])
-                logger.info(f"Removed job {post['id']} for rescheduling.")
-            except JobLookupError:
-                logger.warning(f"Job {post['id']} not found for removal.")
-            add_job(email, post['id'], post['image_path'], updated_caption, new_scheduled_datetime)
-            st.success("Scheduled post updated successfully!")
-            logger.info(f"Post {post['id']} updated for user {email}.")
-
-def delete_scheduled_post(email, post_id):
+def send_post_now(email, post_id):
+    """Immediately send the scheduled post identified by post_id."""
+    metrics = get_user_metrics(email)
+    scheduled_posts = metrics.get("scheduled_posts", [])
+    post = next((p for p in scheduled_posts if p['id'] == post_id), None)
+    if post is None:
+        st.error("Post not found.")
+        return
+    if post.get("posted", False):
+        st.warning("Post already sent.")
+        return
+    if TEST_MODE:
+        st.info("Simulated immediate sending of scheduled post.")
+        logger.info(f"Simulated sending post {post_id} immediately for user {email}.")
+        update_user_metric(email, "instagram_posts_scheduled", 1)
+        remove_scheduled_post(email, post_id)
+        return
     try:
-        scheduler.remove_job(post_id)
-        logger.info(f"Removed job {post_id} from scheduler.")
-    except JobLookupError:
-        logger.warning(f"Job {post_id} not found for removal.")
-    remove_scheduled_post(email, post_id)
-    st.success(f"Scheduled post {post_id} deleted successfully.")
-    logger.info(f"Post {post_id} deleted for user {email}.")
+        post_to_twitter(post["caption"])
+        post_to_instagram(post["caption"], image_path=post["image_path"])
+        st.success("Post sent immediately!")
+        logger.info(f"Sent post {post_id} immediately for user {email}.")
+        update_user_metric(email, "instagram_posts_scheduled", 1)
+        remove_scheduled_post(email, post_id)
+    except Exception as e:
+        st.error(f"Error sending post immediately: {e}")
+        logger.error(f"Error sending post {post_id} immediately for user {email}: {e}")
 
 # ----------------------------- Dashboard Rendering -----------------------------
 def render_dashboard(metrics, thresholds):
