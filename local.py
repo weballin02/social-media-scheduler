@@ -1,71 +1,80 @@
-import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, firestore, auth
+"""
+Local Social Media Content Generator
+
+This is a production-ready, standalone version of the Social Media Scheduler.
+It features:
+  - Local user registration and login (using JSON files instead of Firebase)
+  - Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
+  - RSS feed functionality with image downloading
+  - Instagram posting using instagrapi with session saving (avoiding 2FA prompts)
+  - Scheduling of posts via APScheduler and Selenium for article scraping
+  - A dashboard and separate pages for RSS feeds and Instagram scheduling
+  - Logging of events
+
+Requirements: see requirements.txt
+"""
+
 import os
+import json
+import time
+import threading
+import atexit
+import logging
+from datetime import datetime
+
+import streamlit as st
 import feedparser
 import requests
-from datetime import datetime
 from instagrapi import Client
+import tweepy
 
-# Import necessary libraries for Selenium
+# Selenium and related imports
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
-import time
-import atexit
 
-# Import Image from Pillow for handling image downloading
+# Pillow and BeautifulSoup for image and HTML parsing
 from PIL import Image
 from io import BytesIO
-
-# Import BeautifulSoup for HTML parsing
 from bs4 import BeautifulSoup
 
-# Import APScheduler for scheduling posts
+# APScheduler for scheduling posts
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 
-# Import pytz for timezone handling
+# pytz for timezone handling
 import pytz
 
-# Import logging module
-import logging
-
 # ----------------------------- Logging Configuration -----------------------------
-
-# Configure logging
 logging.basicConfig(
-    filename='app.log',  # Log file name
-    level=logging.INFO,   # Logging level
-    format='%(asctime)s - %(levelname)s - %(message)s',  # Log message format
-    datefmt='%Y-%m-%d %H:%M:%S'  # Date format
+    filename='app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
-
 logger = logging.getLogger(__name__)
 
-# ----------------------------- Firebase Initialization -----------------------------
+# ----------------------------- Local Storage Files -----------------------------
+USERS_FILE = "users.json"            # for storing user credentials and role
+USER_METRICS_FILE = "user_metrics.json"  # for storing per-user metrics
+RSS_FEEDS_FILE = "user_rss_feeds.json"    # for storing user-saved RSS feeds
+POSTS_FILE = "scheduled_posts.json"       # for storing scheduled posts
 
-# Initialize Firebase Admin SDK
-if not firebase_admin._apps:
-    try:
-        cred = credentials.Certificate("firebase_key.json")  # Ensure this path is correct
-        firebase_admin.initialize_app(cred)
-        logger.info("Firebase initialized successfully.")
-    except Exception as e:
-        logger.error(f"Firebase initialization failed: {e}")
-        st.error(f"Firebase initialization failed: {e}")
-        st.stop()
+# ----------------------------- Helper Function for Rerun -----------------------------
+def rerun_app():
+    """Force the app to rerun."""
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    else:
+        st.info("Please refresh the page to see the update.")
 
-# Initialize Firestore Database
-db = firestore.client()
-
-# ----------------------------- Streamlit Configuration ------------------------------
-
+# ----------------------------- Streamlit Page Config -----------------------------
 st.set_page_config(page_title="Social Media Content Generator", layout="wide")
 
-# ----------------------------- Session State Initialization -------------------------
-
+# ----------------------------- Session State Initialization -----------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "user_email" not in st.session_state:
@@ -79,114 +88,143 @@ if "instagram_client" not in st.session_state:
 if "scheduled_posts" not in st.session_state:
     st.session_state.scheduled_posts = []
 
-# ----------------------------- Firestore Helper Functions ---------------------------
+# ----------------------------- Local User Management -----------------------------
+def load_users():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Error loading users: {e}")
+            return {}
+    else:
+        return {}
+
+def save_users(users):
+    try:
+        with open(USERS_FILE, "w") as f:
+            json.dump(users, f, indent=4)
+    except Exception as e:
+        st.error(f"Error saving users: {e}")
+
+def register_user_local(email, password):
+    users = load_users()
+    if email in users:
+        st.error("User already exists. Please log in.")
+        return False
+    users[email] = {"password": password, "role": "free"}
+    save_users(users)
+    initialize_user_metrics(email)
+    st.success("Registration successful! Please log in.")
+    logger.info(f"User registered: {email}")
+    return True
+
+def login_user_local(email, password):
+    users = load_users()
+    if email not in users:
+        st.error("User not found. Please register.")
+        return False
+    if users[email]["password"] != password:
+        st.error("Incorrect password.")
+        return False
+    st.session_state.user_email = email
+    st.session_state.user_role = users[email].get("role", "free")
+    st.session_state.logged_in = True
+    initialize_user_metrics(email)
+    st.success(f"Logged in as {st.session_state.user_role} user!")
+    logger.info(f"User logged in: {email}")
+    load_and_schedule_existing_posts(email)
+    return True
+
+# ----------------------------- Local User Metrics Management -----------------------------
+def load_user_metrics():
+    if os.path.exists(USER_METRICS_FILE):
+        try:
+            with open(USER_METRICS_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Error loading user metrics: {e}")
+            return {}
+    else:
+        return {}
+
+def save_user_metrics(metrics):
+    try:
+        with open(USER_METRICS_FILE, "w") as f:
+            json.dump(metrics, f, indent=4)
+    except Exception as e:
+        st.error(f"Error saving user metrics: {e}")
 
 def initialize_user_metrics(email):
-    """Ensure a Firestore document exists for the user."""
-    doc_ref = db.collection("users").document(email)
-    doc = doc_ref.get()
-    if not doc.exists:
-        doc_ref.set({
-            "rss_headlines_fetched": 0,
-            "instagram_posts_scheduled": 0,
-            "scheduled_posts": []
-        })
-        logger.info(f"Initialized Firestore metrics for user: {email}")
-    else:
-        logger.info(f"Firestore metrics retrieved for user: {email}")
-    return doc_ref
-
-def get_user_metrics(email):
-    """Retrieve user metrics from Firestore, ensuring the document exists."""
-    try:
-        doc_ref = db.collection("users").document(email)
-        doc = doc_ref.get()
-        if doc.exists:
-            metrics = doc.to_dict()
-            logger.info(f"Retrieved user metrics for {email}: {metrics}")
-            return metrics
-        else:
-            initialize_user_metrics(email)
-            return {
-                "rss_headlines_fetched": 0,
-                "instagram_posts_scheduled": 0,
-                "scheduled_posts": []
-            }
-    except Exception as e:
-        logger.error(f"Error retrieving user metrics for {email}: {e}")
-        st.error(f"Error retrieving user metrics: {e}")
-        return {
+    metrics = load_user_metrics()
+    if email not in metrics:
+        metrics[email] = {
             "rss_headlines_fetched": 0,
             "instagram_posts_scheduled": 0,
             "scheduled_posts": []
         }
+        save_user_metrics(metrics)
+        logger.info(f"Initialized metrics for user: {email}")
+
+def get_user_metrics(email):
+    metrics = load_user_metrics()
+    return metrics.get(email, {"rss_headlines_fetched": 0, "instagram_posts_scheduled": 0, "scheduled_posts": []})
 
 def update_user_metric(email, metric, value):
-    """Safely update a Firestore document for the user."""
-    doc_ref = db.collection("users").document(email)
-    doc = doc_ref.get()
-    if not doc.exists:
+    metrics = load_user_metrics()
+    if email not in metrics:
         initialize_user_metrics(email)
-    try:
-        doc_ref.update({metric: firestore.Increment(value)})
-        logger.info(f"Updated {metric} by {value} for user {email}.")
-    except Exception as e:
-        logger.error(f"Failed to update user metric '{metric}' for {email}: {e}")
-        st.error(f"Failed to update user metric '{metric}': {e}")
+        metrics = load_user_metrics()
+    metrics[email][metric] = metrics[email].get(metric, 0) + value
+    save_user_metrics(metrics)
+    logger.info(f"Updated {metric} by {value} for user {email}.")
 
 def add_scheduled_post(email, post_data):
-    """Add a scheduled post to Firestore."""
-    try:
-        doc_ref = db.collection("users").document(email)
-        scheduled_posts = doc_ref.get().to_dict().get("scheduled_posts", [])
-        scheduled_posts.append(post_data)
-        doc_ref.update({"scheduled_posts": scheduled_posts})
-        logger.info(f"Added scheduled post for user {email}: {post_data}")
-    except Exception as e:
-        logger.error(f"Failed to add scheduled post for user {email}: {e}")
-        st.error(f"Failed to add scheduled post: {e}")
+    metrics = load_user_metrics()
+    if email not in metrics:
+        initialize_user_metrics(email)
+        metrics = load_user_metrics()
+    scheduled_posts = metrics[email].get("scheduled_posts", [])
+    scheduled_posts.append(post_data)
+    metrics[email]["scheduled_posts"] = scheduled_posts
+    save_user_metrics(metrics)
+    logger.info(f"Added scheduled post for user {email}: {post_data}")
 
 def remove_scheduled_post(email, post_id):
-    """Remove a scheduled post from Firestore."""
-    try:
-        doc_ref = db.collection("users").document(email)
-        scheduled_posts = doc_ref.get().to_dict().get("scheduled_posts", [])
+    metrics = load_user_metrics()
+    if email in metrics:
+        scheduled_posts = metrics[email].get("scheduled_posts", [])
         updated_posts = [post for post in scheduled_posts if post['id'] != post_id]
-        doc_ref.update({"scheduled_posts": updated_posts})
+        metrics[email]["scheduled_posts"] = updated_posts
+        save_user_metrics(metrics)
         logger.info(f"Removed scheduled post {post_id} for user {email}.")
-    except Exception as e:
-        logger.error(f"Failed to remove scheduled post {post_id} for user {email}: {e}")
-        st.error(f"Failed to remove scheduled post: {e}")
 
 def update_scheduled_post(email, post_id, updated_data):
-    """Update a scheduled post in Firestore."""
-    try:
-        doc_ref = db.collection("users").document(email)
-        scheduled_posts = doc_ref.get().to_dict().get("scheduled_posts", [])
+    metrics = load_user_metrics()
+    if email in metrics:
+        scheduled_posts = metrics[email].get("scheduled_posts", [])
         for idx, post in enumerate(scheduled_posts):
             if post['id'] == post_id:
                 scheduled_posts[idx].update(updated_data)
                 break
-        doc_ref.update({"scheduled_posts": scheduled_posts})
+        metrics[email]["scheduled_posts"] = scheduled_posts
+        save_user_metrics(metrics)
         logger.info(f"Updated scheduled post {post_id} for user {email}: {updated_data}")
-    except Exception as e:
-        logger.error(f"Failed to update scheduled post {post_id} for user {email}: {e}")
-        st.error(f"Failed to update scheduled post: {e}")
 
-# ----------------------------- Selenium WebDriver Initialization ---------------------
+# ----------------------------- Selenium WebDriver Initialization -----------------------------
+from selenium.webdriver.chrome.options import Options
 
 @st.cache_resource(show_spinner=False)
 def init_selenium_driver():
     """Initialize and return a Selenium WebDriver using webdriver-manager."""
     try:
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument("--headless")  # Run in headless mode
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        # Use webdriver-manager to handle ChromeDriver
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        logger.info("Selenium WebDriver initialized successfully.")
+        logger.info("Selenium WebDriver initialized.")
         return driver
     except Exception as e:
         logger.error(f"Selenium WebDriver initialization failed: {e}")
@@ -194,86 +232,57 @@ def init_selenium_driver():
         st.stop()
 
 driver = init_selenium_driver()
-
-# Ensure the driver quits when the app stops
-def close_driver():
-    try:
-        driver.quit()
-        logger.info("Selenium WebDriver closed successfully.")
-    except Exception as e:
-        logger.error(f"Error closing Selenium WebDriver: {e}")
-
-atexit.register(close_driver)
+atexit.register(lambda: driver.quit())
 
 def scrape_article_content(url):
-    """Fetch and return the main content from an article URL."""
+    """Fetch and return the main content from an article URL using Selenium."""
     try:
         driver.get(url)
-        time.sleep(3)  # Wait for the page to load
+        time.sleep(3)
         paragraphs = driver.find_elements(By.TAG_NAME, "p")
-        article_content = " ".join([p.text for p in paragraphs])
-        logger.info(f"Scraped article content from {url}.")
-        return article_content.strip()
+        content = " ".join([p.text for p in paragraphs])
+        logger.info(f"Scraped content from {url}")
+        return content.strip()
     except Exception as e:
-        logger.error(f"Failed to fetch content from {url}: {e}")
-        st.error(f"Failed to fetch content from {url}: {e}")
+        logger.error(f"Failed to scrape content from {url}: {e}")
+        st.error(f"Failed to scrape content from {url}: {e}")
         return ""
 
-# ----------------------------- Scheduler Initialization -------------------------------
+# ----------------------------- Scheduler Initialization -----------------------------
+from apscheduler.schedulers.background import BackgroundScheduler
 
 @st.cache_resource(show_spinner=False)
 def init_scheduler():
-    """Initialize and return the APScheduler."""
     scheduler = BackgroundScheduler()
     scheduler.start()
-    logger.info("APScheduler initialized and started.")
+    logger.info("APScheduler started.")
     return scheduler
 
 scheduler = init_scheduler()
-
-# Ensure scheduler shuts down when the app stops
-def shutdown_scheduler():
-    try:
-        scheduler.shutdown()
-        logger.info("APScheduler shut down successfully.")
-    except Exception as e:
-        logger.error(f"Error shutting down APScheduler: {e}")
-
-atexit.register(shutdown_scheduler)
+atexit.register(lambda: scheduler.shutdown())
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
-    """Function to upload the Instagram post at the scheduled time."""
+    """Upload the Instagram post at the scheduled time using a new Client instance."""
     try:
-        # Initialize a new Instagram client
         client = Client()
         session_file = f"sessions/{email}.json"
-        
-        # Check if session file exists
         if os.path.exists(session_file):
             client.load_settings(session_file)
-            client.load_session(session_file)
-            client.login_by_sessionid(client.session_id)
-            logger.info(f"Loaded Instagram session for user {email}.")
+            client.login(insta_username, insta_password)
+            logger.info(f"Loaded Instagram session for {email}")
         else:
-            logger.error(f"Instagram session file not found for user {email}.")
-            st.error(f"Instagram session file not found for user {email}. Please re-login.")
+            logger.error(f"Instagram session file not found for {email}")
+            st.error(f"Instagram session file not found for {email}. Please re-login.")
             return
-        
-        # Upload the photo
         client.photo_upload(image_path, caption)
-        logger.info(f"Scheduled Instagram post {post_id} uploaded successfully.")
-        
-        # Update Firestore metrics
+        logger.info(f"Scheduled Instagram post {post_id} uploaded.")
         update_user_metric(email, "instagram_posts_scheduled", 1)
-        
-        # Remove the post from scheduled_posts after successful upload
         remove_scheduled_post(email, post_id)
-        
     except Exception as e:
         logger.error(f"Failed to upload scheduled Instagram post {post_id}: {e}")
 
 def add_job(email, post_id, image_path, caption, scheduled_time):
-    """Add a job to the scheduler."""
+    """Add a job to APScheduler."""
     try:
         scheduler.add_job(
             schedule_instagram_post,
@@ -283,13 +292,13 @@ def add_job(email, post_id, image_path, caption, scheduled_time):
             id=post_id,
             replace_existing=True
         )
-        logger.info(f"Scheduled job {post_id} at {scheduled_time} for user {email}.")
+        logger.info(f"Job {post_id} scheduled at {scheduled_time} for {email}")
     except Exception as e:
         logger.error(f"Failed to schedule job {post_id}: {e}")
         st.error(f"Failed to schedule post: {e}")
 
 def load_and_schedule_existing_posts(email):
-    """Load existing scheduled posts from Firestore and schedule them."""
+    """Load and schedule existing posts from local metrics storage."""
     metrics = get_user_metrics(email)
     scheduled_posts = metrics.get("scheduled_posts", [])
     for post in scheduled_posts:
@@ -299,21 +308,17 @@ def load_and_schedule_existing_posts(email):
         scheduled_time = datetime.fromisoformat(post['scheduled_time'])
         timezone = post['timezone']
         scheduled_time = pytz.timezone(timezone).localize(scheduled_time)
-        
-        # Check if the job is already scheduled
         if not scheduler.get_job(post_id):
             if scheduled_time > datetime.now(pytz.timezone(timezone)):
                 add_job(email, post_id, image_path, caption, scheduled_time)
-                logger.info(f"Loaded and scheduled existing post {post_id} for user {email}.")
+                logger.info(f"Loaded and scheduled post {post_id} for {email}")
             else:
-                # If the scheduled time is past, attempt to post immediately
-                logger.info(f"Scheduled time for post {post_id} has passed. Attempting immediate upload.")
+                logger.info(f"Post {post_id} scheduled time passed. Uploading immediately.")
                 schedule_instagram_post(email, post_id, image_path, caption, datetime.now(pytz.timezone(timezone)))
 
-# ----------------------------- RSS Feed Functionality -------------------------------
-
+# ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
-    """Fetch and return headlines with image URLs from the RSS feed."""
+    """Fetch headlines and attempt to download an image for each from the RSS feed."""
     try:
         feed = feedparser.parse(rss_url)
         headlines = []
@@ -321,54 +326,44 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
             title = entry.title
             summary = entry.summary if 'summary' in entry else "No summary available."
             link = entry.link
-
-            # Initialize image_url as None
             image_url = None
 
-            # 1. Check for media:content
             if 'media_content' in entry:
                 media = entry.media_content
                 if isinstance(media, list) and len(media) > 0:
-                    image_url = media[0].get('url', None)
-                    logger.info(f"Found media_content image for headline: {title}")
+                    image_url = media[0].get('url')
+                    logger.info(f"Found media_content image for {title}")
 
-            # 2. Check for media_thumbnail
             if not image_url and 'media_thumbnail' in entry:
                 media_thumbnails = entry.media_thumbnail
                 if isinstance(media_thumbnails, list) and len(media_thumbnails) > 0:
-                    image_url = media_thumbnails[0].get('url', None)
-                    logger.info(f"Found media_thumbnail image for headline: {title}")
+                    image_url = media_thumbnails[0].get('url')
+                    logger.info(f"Found media_thumbnail image for {title}")
 
-            # 3. Check for enclosure
             if not image_url and 'enclosures' in entry:
-                enclosures = entry.enclosures
-                for enclosure in enclosures:
+                for enclosure in entry.enclosures:
                     if enclosure.get('type', '').startswith('image/'):
-                        image_url = enclosure.get('url', None)
-                        logger.info(f"Found enclosure image for headline: {title}")
-                        break  # Take the first image found
+                        image_url = enclosure.get('url')
+                        logger.info(f"Found enclosure image for {title}")
+                        break
 
-            # 4. Check for image in summary/content using BeautifulSoup
             if not image_url and 'summary' in entry:
-                summary_html = entry.summary
-                soup = BeautifulSoup(summary_html, 'html.parser')
+                soup = BeautifulSoup(entry.summary, 'html.parser')
                 img_tag = soup.find('img')
                 if img_tag and img_tag.get('src'):
                     image_url = img_tag.get('src')
-                    logger.info(f"Found embedded image in summary for headline: {title}")
+                    logger.info(f"Found embedded image in summary for {title}")
 
-            # Download the image if image_url is found
             image_path = None
             if image_url:
                 image_path = download_image(image_url, image_dir=image_dir)
                 if image_path:
-                    logger.info(f"Image downloaded and saved at {image_path} for headline: {title}")
+                    logger.info(f"Downloaded image for {title} to {image_path}")
                 else:
-                    logger.warning(f"Image download failed for headline: {title}")
+                    logger.warning(f"Image download failed for {title}")
             else:
-                logger.warning(f"No image found for headline: {title}")
+                logger.warning(f"No image found for {title}")
 
-            # Append the headline data
             headlines.append({
                 "title": title,
                 "summary": summary,
@@ -376,7 +371,7 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
                 "image_url": image_url,
                 "image_path": image_path
             })
-        logger.info(f"Fetched {len(headlines)} headlines from {rss_url}.")
+        logger.info(f"Fetched {len(headlines)} headlines from {rss_url}")
         return headlines
     except Exception as e:
         logger.error(f"Failed to fetch RSS feed from {rss_url}: {e}")
@@ -384,33 +379,26 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
         return []
 
 def download_image(image_url, image_dir="generated_posts"):
-    """Download an image from a URL and save it locally."""
+    """Download an image from the given URL and save it locally."""
     try:
         response = requests.get(image_url, timeout=10)
-        response.raise_for_status()  # Raise an exception for HTTP errors
+        response.raise_for_status()
         img = Image.open(BytesIO(response.content)).convert("RGB")
-
-        # Ensure the image directory exists
         if not os.path.exists(image_dir):
             os.makedirs(image_dir)
-            logger.info(f"Created directory: {image_dir}")
-
-        # Define image path with timestamp and unique identifier
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')  # Including microseconds for uniqueness
+            logger.info(f"Created directory {image_dir}")
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
         image_filename = f"ig_post_{timestamp}.jpg"
         image_path = os.path.join(image_dir, image_filename)
-
-        # Save the image
         img.save(image_path)
-        logger.info(f"Image downloaded from {image_url} and saved at {image_path}")
+        logger.info(f"Image saved at {image_path}")
         return image_path
     except Exception as e:
         logger.error(f"Failed to download image from {image_url}: {e}")
         st.error(f"Failed to download image from {image_url}: {e}")
         return None
 
-# ----------------------------- Instagram Scheduler Functionality ---------------------
-
+# ----------------------------- Instagram Scheduler Functionality -----------------------------
 def render_instagram_scheduler_page():
     st.header("📅 Instagram Scheduler")
     st.subheader("Plan and Automate Your Instagram Content")
@@ -429,55 +417,36 @@ def render_instagram_scheduler_page():
                 client = Client()
                 client.login(username, password)
                 st.session_state.instagram_client = client
-
-                # Save session to file for persistence
                 if not os.path.exists("sessions"):
                     os.makedirs("sessions")
                 session_file = f"sessions/{username}.json"
                 client.dump_settings(session_file)
                 client.dump_session(session_file)
-                logger.info(f"User {username} logged into Instagram successfully and session saved.")
+                logger.info(f"User {username} logged into Instagram; session saved.")
                 st.success("Logged into Instagram and session saved!")
             except Exception as e:
                 st.error(f"Login failed: {e}")
-                logger.error(f"Instagram login failed for user {username}: {e}")
+                logger.error(f"Instagram login failed for {username}: {e}")
 
     st.markdown("---")
-
     st.subheader("📅 Schedule New Instagram Posts")
 
-    # Fetch user metrics to get scheduled posts
     if st.session_state.user_email:
         metrics = get_user_metrics(st.session_state.user_email)
         scheduled_posts = metrics.get("scheduled_posts", [])
     else:
         scheduled_posts = []
 
-    # Fetch all headlines
     fetched_headlines = st.session_state.rss_headlines
-
-    # Retrieve scheduled post captions to prevent duplicate scheduling
     scheduled_captions = [post.get('caption', '').replace(f" Read more at: {post.get('article_url', '')}", '') for post in scheduled_posts]
-
-    # Determine unscheduled headlines
-    unscheduled_headlines = [
-        headline for headline in fetched_headlines
-        if headline['title'] not in scheduled_captions
-    ]
+    unscheduled_headlines = [headline for headline in fetched_headlines if headline['title'] not in scheduled_captions]
 
     if not unscheduled_headlines:
         st.info("No unscheduled posts available. Fetch more headlines or schedule existing posts.")
         return
 
-    # Create a mapping from titles to headlines
     title_to_headline = {headline['title']: headline for headline in unscheduled_headlines}
-
-    # Multiselect dropdown for unscheduled posts
-    selected_titles = st.multiselect(
-        "Select Post(s) to Schedule",
-        options=list(title_to_headline.keys()),
-        format_func=lambda x: x  # Display titles as they are
-    )
+    selected_titles = st.multiselect("Select Post(s) to Schedule", options=list(title_to_headline.keys()))
 
     if selected_titles:
         for title in selected_titles:
@@ -487,50 +456,33 @@ def render_instagram_scheduler_page():
                 st.image(headline['image_path'], caption="Fetched Image", use_container_width=True)
             else:
                 st.warning("No image available for this headline.")
-
-            # Create a form for each post
             with st.form(key=f"schedule_form_{title}", clear_on_submit=False):
-                # Select date and time for each post
                 col1, col2 = st.columns(2)
                 with col1:
                     scheduled_date = st.date_input(f"Select Date for '{title}'", datetime.now(), key=f"date_{title}")
                 with col2:
                     scheduled_time = st.time_input(f"Select Time for '{title}'", datetime.now().time(), key=f"time_{title}")
-
                 caption = st.text_area(f"Post Caption for '{title}'", headline['title'], key=f"caption_{title}")
-
                 submitted = st.form_submit_button(f"Schedule '{title}'")
                 if submitted:
                     if not st.session_state.instagram_client:
                         st.error("Please login to Instagram first.")
-                        logger.warning("Attempted to schedule post without Instagram login.")
+                        logger.warning("Attempted scheduling without Instagram login.")
                     else:
-                        # Combine date and time with timezone
                         try:
                             scheduled_datetime = datetime.combine(scheduled_date, scheduled_time)
                             scheduled_datetime = pytz.timezone(timezone).localize(scheduled_datetime)
                         except Exception as e:
                             st.error(f"Error in scheduling datetime: {e}")
-                            logger.error(f"Error in scheduling datetime for post '{title}': {e}")
+                            logger.error(f"Error scheduling post '{title}': {e}")
                             continue
-
-                        # Check if scheduled_datetime is in the future
                         now = datetime.now(pytz.timezone(timezone))
                         if scheduled_datetime <= now:
                             st.error("Scheduled time must be in the future!")
-                            logger.warning(f"User attempted to schedule post '{title}' in the past.")
+                            logger.warning(f"User attempted to schedule '{title}' in the past.")
                             continue
-
-                        # Generate a unique ID for the scheduled post
                         post_id = f"{st.session_state.user_email}_{int(time.time())}_{title.replace(' ', '_')}"
-
-                        # Prepare caption with article URL
-                        if headline['link']:
-                            full_caption = f"{caption}\nRead more at: {headline['link']}"
-                        else:
-                            full_caption = caption  # If no link is available
-
-                        # Prepare post data
+                        full_caption = f"{caption}\nRead more at: {headline['link']}" if headline['link'] else caption
                         post_data = {
                             "id": post_id,
                             "image_path": headline['image_path'],
@@ -539,26 +491,12 @@ def render_instagram_scheduler_page():
                             "timezone": timezone,
                             "article_url": headline['link'] if headline['link'] else ""
                         }
-
-                        # Add the post to Firestore
                         add_scheduled_post(st.session_state.user_email, post_data)
-
-                        # Schedule the post using APScheduler
-                        add_job(
-                            st.session_state.user_email,
-                            post_id,
-                            headline['image_path'],
-                            full_caption,
-                            scheduled_datetime
-                        )
-
-                        st.success(f"Post '{title}' scheduled successfully for {scheduled_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                        logger.info(f"Post '{post_id}' scheduled for {scheduled_datetime} by user {st.session_state.user_email}.")
-
+                        add_job(st.session_state.user_email, post_id, headline['image_path'], full_caption, scheduled_datetime)
+                        st.success(f"Post '{title}' scheduled for {scheduled_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                        logger.info(f"Scheduled post {post_id} for {st.session_state.user_email}")
     st.markdown("---")
-
     st.subheader("📋 Your Scheduled Posts")
-
     if scheduled_posts:
         for post in scheduled_posts:
             with st.expander(f"Post ID: {post['id']}"):
@@ -575,8 +513,7 @@ def render_instagram_scheduler_page():
                     if post.get('article_url'):
                         st.markdown(f"**Article URL:** [Read more]({post['article_url']})")
                     else:
-                        st.markdown(f"**Article URL:** Not available")
-                    # Edit and Delete buttons
+                        st.markdown("**Article URL:** Not available")
                     col_a, col_b = st.columns(2)
                     with col_a:
                         if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
@@ -588,101 +525,66 @@ def render_instagram_scheduler_page():
         st.info("No scheduled posts found.")
 
 def edit_scheduled_post(email, post):
-    """Provide a form to edit a scheduled post."""
     with st.form(f"edit_form_{post['id']}"):
         st.header(f"Edit Scheduled Post {post['id']}")
-
-        # Extract the original caption without the article URL
         original_caption = post['caption']
         article_url = post.get('article_url', '')
         if article_url:
-            # Remove the 'Read more at: <URL>' part
             original_caption = original_caption.replace(f"\nRead more at: {article_url}", '')
-
         new_caption = st.text_area("Post Caption", original_caption, key=f"edit_caption_{post['id']}")
-
-        # Parse the scheduled time
         scheduled_time = datetime.fromisoformat(post['scheduled_time'])
         timezone = post.get('timezone', 'UTC')
-
         col1, col2 = st.columns(2)
         with col1:
             new_date = st.date_input("Select Date", scheduled_time.date(), key=f"edit_date_{post['id']}")
         with col2:
             new_time = st.time_input("Select Time", scheduled_time.time(), key=f"edit_time_{post['id']}")
-
         new_timezone = st.selectbox("Select Timezone", pytz.all_timezones, index=pytz.all_timezones.index(timezone), key=f"edit_timezone_{post['id']}")
-
         submitted = st.form_submit_button("Update Post")
         if submitted:
-            # Combine date and time with timezone
             try:
                 new_scheduled_datetime = datetime.combine(new_date, new_time)
                 new_scheduled_datetime = pytz.timezone(new_timezone).localize(new_scheduled_datetime)
             except Exception as e:
                 st.error(f"Error in scheduling datetime: {e}")
-                logger.error(f"Error in scheduling datetime for post '{post['id']}': {e}")
+                logger.error(f"Error updating post '{post['id']}': {e}")
                 return
-
-            # Check if new_scheduled_datetime is in the future
             now = datetime.now(pytz.timezone(new_timezone))
             if new_scheduled_datetime <= now:
                 st.error("Scheduled time must be in the future!")
                 logger.warning(f"User attempted to update post '{post['id']}' to a past time.")
                 return
-
-            # Prepare updated caption with article URL
-            if post.get('article_url'):
-                updated_caption = f"{new_caption}\nRead more at: {post['article_url']}"
-            else:
-                updated_caption = new_caption  # If no link is available
-
-            # Update Firestore
+            updated_caption = f"{new_caption}\nRead more at: {post['article_url']}" if post.get('article_url') else new_caption
             updated_data = {
                 "caption": updated_caption,
                 "scheduled_time": new_scheduled_datetime.isoformat(),
                 "timezone": new_timezone
             }
             update_scheduled_post(email, post['id'], updated_data)
-
-            # Reschedule the job
             try:
                 scheduler.remove_job(post['id'])
                 logger.info(f"Removed existing job {post['id']} for rescheduling.")
             except JobLookupError:
-                logger.warning(f"Job {post['id']} not found in scheduler for removal.")
-
-            add_job(
-                email,
-                post['id'],
-                post['image_path'],
-                updated_caption,
-                new_scheduled_datetime
-            )
-
+                logger.warning(f"Job {post['id']} not found for removal.")
+            add_job(email, post['id'], post['image_path'], updated_caption, new_scheduled_datetime)
             st.success("Scheduled post updated successfully!")
-            logger.info(f"Scheduled post {post['id']} updated to {new_scheduled_datetime} by user {email}.")
+            logger.info(f"Post {post['id']} updated for user {email}.")
 
 def delete_scheduled_post(email, post_id):
-    """Delete a scheduled post."""
     try:
         scheduler.remove_job(post_id)
         logger.info(f"Removed job {post_id} from scheduler.")
     except JobLookupError:
-        logger.warning(f"Job {post_id} not found in scheduler for removal.")
-
+        logger.warning(f"Job {post_id} not found for removal.")
     remove_scheduled_post(email, post_id)
     st.success(f"Scheduled post {post_id} deleted successfully.")
-    logger.info(f"Scheduled post {post_id} deleted by user {email}.")
+    logger.info(f"Post {post_id} deleted for user {email}.")
 
-# ----------------------------- Dashboard Rendering -----------------------------------
-
+# ----------------------------- Dashboard Rendering -----------------------------
 def render_dashboard(metrics, thresholds):
     st.header("📊 Dashboard")
     st.subheader("Your Activity Overview")
-
     col1, col2 = st.columns(2)
-
     def render_metric_card(column, label, current, total, icon_url, progress_color):
         with column:
             st.markdown(
@@ -699,8 +601,6 @@ def render_dashboard(metrics, thresholds):
                 """,
                 unsafe_allow_html=True,
             )
-
-    # RSS Headlines Fetched
     render_metric_card(
         col1,
         "RSS Headlines Fetched",
@@ -709,8 +609,6 @@ def render_dashboard(metrics, thresholds):
         "https://img.icons8.com/color/64/000000/rss.png",
         "#4CAF50" if metrics.get("rss_headlines_fetched", 0) < thresholds.get("rss_headlines_fetched", 10) else "#FF5722",
     )
-
-    # Instagram Posts Scheduled
     render_metric_card(
         col2,
         "Instagram Posts Scheduled",
@@ -719,116 +617,78 @@ def render_dashboard(metrics, thresholds):
         "https://img.icons8.com/color/64/000000/instagram-new.png",
         "#4CAF50" if metrics.get("instagram_posts_scheduled", 0) < thresholds.get("instagram_posts_scheduled", 5) else "#FF5722",
     )
-
-    # Upgrade Suggestion
     if st.session_state.user_role == "free":
         if metrics.get("rss_headlines_fetched", 0) >= thresholds.get("rss_headlines_fetched", 10):
             st.warning("Upgrade to Premium to fetch more RSS headlines!")
         if metrics.get("instagram_posts_scheduled", 0) >= thresholds.get("instagram_posts_scheduled", 5):
             st.warning("Upgrade to Premium to schedule more Instagram posts!")
 
-# ----------------------------- RSS Feeds Rendering ------------------------------------
-
+# ----------------------------- RSS Feeds Rendering -----------------------------
 def render_rss_feeds_page():
     st.header("📰 RSS Feeds")
     st.subheader("Explore the Latest News and Create Instagram Posts")
-
     rss_feeds = {
         "BBC News": "http://feeds.bbci.co.uk/news/rss.xml",
         "CNN": "http://rss.cnn.com/rss/cnn_topstories.rss",
         "Reuters": "http://feeds.reuters.com/reuters/topNews",
     }
-
     feed_name = st.selectbox("Choose a Feed", list(rss_feeds.keys()))
     rss_url = rss_feeds[feed_name]
     custom_rss_url = st.text_input("Custom RSS Feed URL (optional)", "")
     if custom_rss_url:
         rss_url = custom_rss_url
-
     num_headlines = st.slider("Number of Headlines", 1, 10, 5)
-
     if st.button("Fetch Headlines"):
         st.subheader(f"Top {num_headlines} Headlines from {feed_name}")
-        # Clear previous headlines to prevent duplication
         st.session_state.rss_headlines = []
         headlines = fetch_headlines(rss_url, limit=num_headlines)
         if headlines:
-            progress_text = "Fetching RSS headlines and downloading images..."
-            progress_bar = st.progress(0, text=progress_text)
+            progress_bar = st.progress(0)
             total_headlines = len(headlines)
             for idx, entry in enumerate(headlines):
                 st.markdown(f"### [{entry['title']}]({entry['link']})")
                 st.write(entry['summary'])
-                # Display the downloaded image if available
                 if entry['image_path']:
                     st.image(entry['image_path'], caption="Fetched Image", use_container_width=True)
-                    # Append to session state
-                    st.session_state.rss_headlines.append({
-                        "title": entry['title'],
-                        "summary": entry['summary'],
-                        "link": entry['link'],
-                        "image_url": entry['image_url'],
-                        "image_path": entry['image_path']
-                    })
+                    st.session_state.rss_headlines.append(entry)
                 else:
                     st.warning("No image available for this headline.")
                 update_user_metric(st.session_state.user_email, "rss_headlines_fetched", 1)
-                progress = (idx + 1) / total_headlines
-                progress_bar.progress(progress, text=f"{int(progress*100)}% Completed")
-                time.sleep(0.5)  # Simulate delay
+                progress_bar.progress((idx + 1) / total_headlines)
+                time.sleep(0.5)
             progress_bar.empty()
-            st.success("RSS headlines fetched and images downloaded successfully!")
+            st.success("RSS headlines fetched successfully!")
         else:
             st.warning("No headlines found. Try another feed.")
-
-    # Display generated IG posts from fetched headlines
     if st.session_state.rss_headlines:
         st.markdown("## 📸 Generated Instagram Posts from Headlines")
         for idx, post in enumerate(st.session_state.rss_headlines, 1):
             st.markdown(f"### Post {idx}")
-            if 'image_path' in post and post['image_path']:
+            if post.get('image_path') and os.path.exists(post['image_path']):
                 st.image(post['image_path'], caption=post['title'], use_container_width=True)
                 if st.button(f"Schedule Post {idx}", key=f"schedule_{idx}"):
                     if "instagram_client" not in st.session_state or not st.session_state.instagram_client:
                         st.error("Please login to Instagram first.")
-                        logger.warning("Attempted to schedule post without Instagram login.")
+                        logger.warning("Attempted scheduling without Instagram login.")
                     else:
-                        try:
-                            caption = post['title']  # Use the headline as the caption
-                            # Default to current time if no scheduling is done here
-                            # However, since scheduling is handled separately, we'll just prepare data
-                            # The user should use the Instagram Scheduler page to schedule
-                            st.success("Please use the 'Instagram Scheduler' page to schedule this post.")
-                            logger.info(f"User attempted to schedule post {idx} without proper scheduling process.")
-                        except Exception as e:
-                            st.error(f"Failed to schedule post {idx}: {e}")
-                            logger.error(f"Failed to schedule Instagram post {post['image_path']}: {e}")
+                        st.success("Please use the 'Instagram Scheduler' page to schedule this post.")
+                        logger.info(f"User chose to schedule post {idx} via Instagram Scheduler.")
             else:
                 st.warning("Image not available for this headline.")
-                logger.warning(f"No image path available for post: {post['title']}")
 
-# ----------------------------- User Interface Rendering ------------------------------
-
+# ----------------------------- User Interface Rendering -----------------------------
 def render_user_interface():
     menu = st.sidebar.radio("Navigation", ["Dashboard", "RSS Feeds", "Instagram Scheduler"])
-
-    thresholds = {
-        "rss_headlines_fetched": 10,
-        "instagram_posts_scheduled": 5,
-    }
-
+    thresholds = {"rss_headlines_fetched": 10, "instagram_posts_scheduled": 5}
     if menu == "Dashboard":
         metrics = get_user_metrics(st.session_state.user_email)
         render_dashboard(metrics, thresholds)
-
     elif menu == "RSS Feeds":
         render_rss_feeds_page()
-
     elif menu == "Instagram Scheduler":
         render_instagram_scheduler_page()
 
-# ----------------------------- Authentication Functions -------------------------------
-
+# ----------------------------- Local Authentication Functions -----------------------------
 def register_user():
     st.header("Register")
     email = st.text_input("Email")
@@ -837,23 +697,15 @@ def register_user():
     if st.button("Register"):
         if not email or not password or not confirm_password:
             st.error("Please fill out all fields!")
-            logger.warning("User attempted registration without filling all fields.")
+            logger.warning("Registration attempted with missing fields.")
         elif password != confirm_password:
             st.error("Passwords do not match!")
-            logger.warning(f"User registration failed: Passwords do not match for email {email}.")
+            logger.warning(f"Registration failed: passwords do not match for {email}.")
         elif len(password) < 6:
             st.error("Password must be at least 6 characters long.")
-            logger.warning(f"User registration failed: Password too short for email {email}.")
+            logger.warning(f"Registration failed: password too short for {email}.")
         else:
-            try:
-                user = auth.create_user(email=email, password=password)
-                auth.set_custom_user_claims(user.uid, {"role": "free"})
-                initialize_user_metrics(email)
-                st.success("Registration successful! Please log in.")
-                logger.info(f"User registered successfully: {email}")
-            except Exception as e:
-                st.error(f"Registration failed: {e}")
-                logger.error(f"Registration failed for email {email}: {e}")
+            register_user_local(email, password)
 
 def login_user():
     st.header("Login")
@@ -862,43 +714,18 @@ def login_user():
     if st.button("Login"):
         if not email or not password:
             st.error("Please provide both email and password!")
-            logger.warning("User attempted login without providing email or password.")
+            logger.warning("Login attempted with missing email or password.")
         else:
-            try:
-                user = auth.get_user_by_email(email)
-                # Note: Firebase Admin SDK does not handle password verification.
-                # Password verification should be handled on the client side or using Firebase Authentication client SDK.
-                # Here, we assume successful login for demonstration purposes.
-                st.session_state.user_email = email
-                st.session_state.user_role = user.custom_claims.get("role", "free")
-                st.session_state.logged_in = True
-                initialize_user_metrics(email)
-                st.success(f"Logged in as {st.session_state.user_role} user!")
-                logger.info(f"User logged in successfully: {email}")
+            login_user_local(email, password)
 
-                # Load and schedule existing posts
-                load_and_schedule_existing_posts(email)
-
-            except firebase_admin.auth.UserNotFoundError:
-                st.error("User not found. Please register.")
-                logger.warning(f"Login failed: User not found for email {email}.")
-            except Exception as e:
-                st.error(f"Login failed: {e}")
-                logger.error(f"Login failed for email {email}: {e}")
-
-# ----------------------------- Main Application Logic ---------------------------------
-
+# ----------------------------- Main Application Logic -----------------------------
 def main():
     st.title("🚀 Social Media Content Generator")
-
-    # Authentication Section
     if not st.session_state.logged_in:
         st.sidebar.title("Authentication")
         auth_mode = st.sidebar.radio("Choose an option:", ["Login", "Register"])
-
         if auth_mode == "Register":
             register_user()
-
         elif auth_mode == "Login":
             login_user()
     else:
