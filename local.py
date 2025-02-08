@@ -13,10 +13,10 @@ Features:
          - Premium: $9.99/month
          - Pro: $19.99/month
   • Global TEST_MODE flag: When True, all external calls are simulated.
-  • ALLOW_TEST_CARD flag: When True (even if TEST_MODE is False), Stripe Checkout is simulated.
+  • ALLOW_TEST_CARD flag: When True (even in production), Stripe Checkout is simulated.
   • Uses st.query_params (the new API) for reading URL parameters.
   
-Before deployment, replace placeholder API keys/credentials with your production values.
+Before deployment, replace placeholder API keys/credentials and URLs with your actual production values.
 """
 
 import os
@@ -40,11 +40,11 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-# Simulation flags
-TEST_MODE = False            # When True, simulate external calls (e.g. posting, scheduling)
+# Simulation flags (adjust as needed)
+TEST_MODE = False            # When True, simulate external calls.
 ALLOW_TEST_CARD = True       # When True (even if TEST_MODE is False), simulate Stripe Checkout
 
-# Pricing tiers (psychologically optimized)
+# Pricing tiers
 PRICING_TIERS = {
     "Premium": 9.99,
     "Pro": 19.99
@@ -58,9 +58,6 @@ TWITTER_API_KEY = "your_twitter_api_key"
 TWITTER_API_SECRET = "your_twitter_api_secret"
 TWITTER_ACCESS_TOKEN = "your_twitter_access_token"
 TWITTER_ACCESS_SECRET = "your_twitter_access_secret"
-
-# Instagram credentials (these will be used when the user logs in)
-# For posting via instagrapi, we assume the user logs in and the client is saved in session state.
 
 # Local storage file paths
 USERS_FILE = "users.json"
@@ -230,7 +227,6 @@ def update_scheduled_post(email, post_id, updated_data):
 
 # ----------------------------- Stripe Checkout Integration -----------------------------
 def create_stripe_checkout_session(username, plan):
-    # If TEST_MODE or ALLOW_TEST_CARD is True, simulate the session.
     if TEST_MODE or ALLOW_TEST_CARD:
         logger.info("Simulated Stripe session created (using test card simulation).")
         class DummySession:
@@ -250,7 +246,7 @@ def create_stripe_checkout_session(username, plan):
                 'quantity': 1,
             }],
             mode='payment',
-            # Replace with your deployed app URL
+            # Replace these URLs with your deployed app URL.
             success_url=f"http://your-app-url/?session_id={{CHECKOUT_SESSION_ID}}&username={username}&plan={plan}",
             cancel_url="http://your-app-url/?cancel=1",
         )
@@ -305,7 +301,6 @@ def load_and_schedule_existing_posts(email):
 
 # ----------------------------- Social Media Posting Functions -----------------------------
 def post_to_twitter(caption):
-    # Use Tweepy to post a tweet
     try:
         auth = tweepy.OAuthHandler(TWITTER_API_KEY, TWITTER_API_SECRET)
         auth.set_access_token(TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET)
@@ -317,11 +312,10 @@ def post_to_twitter(caption):
         raise
 
 def post_to_instagram(caption, image_path):
-    # Use the logged-in instagrapi client stored in session state.
     try:
         client = st.session_state.instagram_client
         if not client:
-            raise Exception("Instagram client not found.")
+            raise Exception("Instagram client not found. Please login again.")
         client.photo_upload(image_path, caption)
         logger.info(f"Instagram post uploaded: {caption} with image {image_path}")
     except Exception as e:
@@ -338,8 +332,14 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         if not client:
             st.error("Instagram client not found. Please login again.")
             return
-        # Assume the client is already logged in and its session is stored.
-        client.photo_upload(image_path, caption)
+        try:
+            # Attempt to post with current token.
+            client.photo_upload(image_path, caption)
+        except Exception as e:
+            logger.error(f"Initial Instagram post failed for {post_id}: {e}")
+            # Try to refresh token
+            client.relogin()
+            client.photo_upload(image_path, caption)
         logger.info(f"Scheduled Instagram post {post_id} uploaded.")
         update_user_metric(email, "instagram_posts_scheduled", 1)
         remove_scheduled_post(email, post_id)
