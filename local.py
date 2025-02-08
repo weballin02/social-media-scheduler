@@ -5,18 +5,18 @@ Features:
   • Local user registration and login (using JSON files)
   • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
   • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow)
-  • Instagram posting via instagrapi with session saving (to avoid repeated 2FA)
-  • Twitter posting via tweepy (placeholder functions for actual posting)
+  • Instagram posting via instagrapi (with session saving to avoid repeated 2FA)
+  • Twitter posting via tweepy
   • Post scheduling via APScheduler
   • A dashboard and separate pages for RSS feeds, Instagram scheduling, and account upgrade
   • Stripe Checkout integration for monetization with two pricing tiers:
-         - Premium: $9.99/month (unlimited features)
-         - Pro: $19.99/month (priority support, etc.)
+         - Premium: $9.99/month
+         - Pro: $19.99/month
   • Global TEST_MODE flag: When True, all external calls are simulated.
-  • ALLOW_TEST_CARD flag: When True (even in production), the Stripe Checkout session is simulated using test card data.
-  • Uses st.query_params (the new API) instead of the deprecated experimental_* methods.
+  • ALLOW_TEST_CARD flag: When True (even if TEST_MODE is False), Stripe Checkout is simulated.
+  • Uses st.query_params (the new API) for reading URL parameters.
   
-Note: Replace placeholder API keys (like the Stripe secret key) with your actual production keys.
+Before deployment, replace placeholder API keys/credentials with your production values.
 """
 
 import os
@@ -29,7 +29,7 @@ from datetime import datetime
 import streamlit as st
 import feedparser
 import requests
-import tweepy  # (Assume you have actual Twitter posting functions elsewhere)
+import tweepy
 from instagrapi import Client
 from PIL import Image
 from io import BytesIO
@@ -40,9 +40,9 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-# Set these as needed:
-TEST_MODE = False            # When True, simulate all external calls.
-ALLOW_TEST_CARD = True       # When True (even if TEST_MODE is False), simulate Stripe Checkout using test card data.
+# Simulation flags
+TEST_MODE = False            # When True, simulate external calls (e.g. posting, scheduling)
+ALLOW_TEST_CARD = True       # When True (even if TEST_MODE is False), simulate Stripe Checkout
 
 # Pricing tiers (psychologically optimized)
 PRICING_TIERS = {
@@ -50,12 +50,35 @@ PRICING_TIERS = {
     "Pro": 19.99
 }
 
-# Replace with your actual live Stripe secret key
+# Replace with your actual API keys
 stripe.api_key = "your_live_stripe_secret_key"
 
-# Local storage files
+# Twitter API credentials (replace with your actual credentials)
+TWITTER_API_KEY = "your_twitter_api_key"
+TWITTER_API_SECRET = "your_twitter_api_secret"
+TWITTER_ACCESS_TOKEN = "your_twitter_access_token"
+TWITTER_ACCESS_SECRET = "your_twitter_access_secret"
+
+# Instagram credentials (these will be used when the user logs in)
+# For posting via instagrapi, we assume the user logs in and the client is saved in session state.
+
+# Local storage file paths
 USERS_FILE = "users.json"
 USER_METRICS_FILE = "user_metrics.json"
+
+# ----------------------------- Session State Initialization -----------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
+if "user_role" not in st.session_state:
+    st.session_state.user_role = None
+if "rss_headlines" not in st.session_state:
+    st.session_state.rss_headlines = []
+if "instagram_client" not in st.session_state:
+    st.session_state.instagram_client = None
+if "scheduled_posts" not in st.session_state:
+    st.session_state.scheduled_posts = []
 
 # ----------------------------- Logging Configuration -----------------------------
 logging.basicConfig(
@@ -207,7 +230,7 @@ def update_scheduled_post(email, post_id, updated_data):
 
 # ----------------------------- Stripe Checkout Integration -----------------------------
 def create_stripe_checkout_session(username, plan):
-    # If in test mode or if test card simulation is enabled, simulate the session.
+    # If TEST_MODE or ALLOW_TEST_CARD is True, simulate the session.
     if TEST_MODE or ALLOW_TEST_CARD:
         logger.info("Simulated Stripe session created (using test card simulation).")
         class DummySession:
@@ -227,7 +250,7 @@ def create_stripe_checkout_session(username, plan):
                 'quantity': 1,
             }],
             mode='payment',
-            # Make sure these URLs point to your deployed app!
+            # Replace with your deployed app URL
             success_url=f"http://your-app-url/?session_id={{CHECKOUT_SESSION_ID}}&username={username}&plan={plan}",
             cancel_url="http://your-app-url/?cancel=1",
         )
@@ -280,14 +303,30 @@ def load_and_schedule_existing_posts(email):
                 logger.info(f"Post {post_id} scheduled time passed. Uploading immediately.")
                 schedule_instagram_post(email, post_id, image_path, caption, datetime.now(pytz.timezone(timezone)))
 
-# ----------------------------- Placeholder Functions for Social Media Posting -----------------------------
+# ----------------------------- Social Media Posting Functions -----------------------------
 def post_to_twitter(caption):
-    # Placeholder: Integrate with tweepy and your Twitter credentials.
-    logger.info(f"Posting to Twitter: {caption}")
+    # Use Tweepy to post a tweet
+    try:
+        auth = tweepy.OAuthHandler(TWITTER_API_KEY, TWITTER_API_SECRET)
+        auth.set_access_token(TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET)
+        api = tweepy.API(auth)
+        api.update_status(caption)
+        logger.info(f"Tweet posted: {caption}")
+    except Exception as e:
+        logger.error(f"Error posting to Twitter: {e}")
+        raise
 
 def post_to_instagram(caption, image_path):
-    # Placeholder: Integrate with instagrapi and your Instagram credentials.
-    logger.info(f"Posting to Instagram: {caption} with image {image_path}")
+    # Use the logged-in instagrapi client stored in session state.
+    try:
+        client = st.session_state.instagram_client
+        if not client:
+            raise Exception("Instagram client not found.")
+        client.photo_upload(image_path, caption)
+        logger.info(f"Instagram post uploaded: {caption} with image {image_path}")
+    except Exception as e:
+        logger.error(f"Error posting to Instagram: {e}")
+        raise
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
     if TEST_MODE:
@@ -295,28 +334,94 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         logger.info(f"Simulated upload for post {post_id} for user {email}.")
         return
     try:
-        client = Client()
-        session_dir = "sessions"
-        if not os.path.exists(session_dir):
-            os.makedirs(session_dir)
-        # Assume the user’s Instagram credentials are stored and used here.
-        # (Replace with your actual logic to load a session.)
-        session_file = os.path.join(session_dir, f"{email}_instagram.json")
-        if os.path.exists(session_file):
-            client.load_settings(session_file)
-            # For simplicity, we assume login here.
-            logger.info(f"Loaded Instagram session for {email}")
-        else:
-            st.error(f"Instagram session file not found for {email}. Please re-login.")
+        client = st.session_state.instagram_client
+        if not client:
+            st.error("Instagram client not found. Please login again.")
             return
+        # Assume the client is already logged in and its session is stored.
         client.photo_upload(image_path, caption)
         logger.info(f"Scheduled Instagram post {post_id} uploaded.")
         update_user_metric(email, "instagram_posts_scheduled", 1)
         remove_scheduled_post(email, post_id)
     except Exception as e:
         logger.error(f"Failed to upload scheduled Instagram post {post_id}: {e}")
+        st.error(f"Error uploading Instagram post: {e}")
 
-# ----------------------------- Social Media Scheduler Pages -----------------------------
+# ----------------------------- RSS Feed Functions -----------------------------
+def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
+    try:
+        feed = feedparser.parse(rss_url)
+        headlines = []
+        for entry in feed.entries[:limit]:
+            title = entry.title
+            summary = entry.summary if 'summary' in entry else "No summary available."
+            link = entry.link
+            image_url = None
+            if 'media_content' in entry:
+                media = entry.media_content
+                if isinstance(media, list) and len(media) > 0:
+                    image_url = media[0].get('url')
+                    logger.info(f"Found media_content image for {title}")
+            if not image_url and 'media_thumbnail' in entry:
+                media_thumbnails = entry.media_thumbnail
+                if isinstance(media_thumbnails, list) and len(media_thumbnails) > 0:
+                    image_url = media_thumbnails[0].get('url')
+                    logger.info(f"Found media_thumbnail image for {title}")
+            if not image_url and 'enclosures' in entry:
+                for enclosure in entry.enclosures:
+                    if enclosure.get('type', '').startswith('image/'):
+                        image_url = enclosure.get('url')
+                        logger.info(f"Found enclosure image for {title}")
+                        break
+            if not image_url and 'summary' in entry:
+                soup = BeautifulSoup(entry.summary, 'html.parser')
+                img_tag = soup.find('img')
+                if img_tag and img_tag.get('src'):
+                    image_url = img_tag.get('src')
+                    logger.info(f"Found embedded image in summary for {title}")
+            image_path = None
+            if image_url:
+                image_path = download_image(image_url, image_dir=image_dir)
+                if image_path:
+                    logger.info(f"Downloaded image for {title} to {image_path}")
+                else:
+                    logger.warning(f"Image download failed for {title}")
+            else:
+                logger.warning(f"No image found for {title}")
+            headlines.append({
+                "title": title,
+                "summary": summary,
+                "link": link,
+                "image_url": image_url,
+                "image_path": image_path
+            })
+        logger.info(f"Fetched {len(headlines)} headlines from {rss_url}")
+        return headlines
+    except Exception as e:
+        logger.error(f"Failed to fetch RSS feed from {rss_url}: {e}")
+        st.error(f"Failed to fetch RSS feed: {e}")
+        return []
+
+def download_image(image_url, image_dir="generated_posts"):
+    try:
+        response = requests.get(image_url, timeout=10)
+        response.raise_for_status()
+        img = Image.open(BytesIO(response.content)).convert("RGB")
+        if not os.path.exists(image_dir):
+            os.makedirs(image_dir)
+            logger.info(f"Created directory {image_dir}")
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        image_filename = f"ig_post_{timestamp}.jpg"
+        image_path = os.path.join(image_dir, image_filename)
+        img.save(image_path)
+        logger.info(f"Image saved at {image_path}")
+        return image_path
+    except Exception as e:
+        logger.error(f"Failed to download image from {image_url}: {e}")
+        st.error(f"Failed to download image: {e}")
+        return None
+
+# ----------------------------- UI Rendering Functions -----------------------------
 def render_instagram_scheduler_page():
     st.header("📅 Instagram Scheduler")
     st.subheader("Plan and Automate Your Instagram Content")
@@ -436,6 +541,142 @@ def render_instagram_scheduler_page():
     else:
         st.info("No scheduled posts found.")
 
+def edit_scheduled_post(email, post):
+    with st.form(f"edit_form_{post['id']}"):
+        st.header(f"Edit Scheduled Post {post['id']}")
+        original_caption = post['caption']
+        article_url = post.get('article_url', '')
+        if article_url:
+            original_caption = original_caption.replace(f"\nRead more at: {article_url}", '')
+        new_caption = st.text_area("Post Caption", original_caption, key=f"edit_caption_{post['id']}")
+        scheduled_time = datetime.fromisoformat(post['scheduled_time'])
+        timezone = post.get('timezone', 'UTC')
+        col1, col2 = st.columns(2)
+        with col1:
+            new_date = st.date_input("Select Date", scheduled_time.date(), key=f"edit_date_{post['id']}")
+        with col2:
+            new_time = st.time_input("Select Time", scheduled_time.time(), key=f"edit_time_{post['id']}")
+        new_timezone = st.selectbox("Select Timezone", pytz.all_timezones, index=pytz.all_timezones.index(timezone), key=f"edit_timezone_{post['id']}")
+        submitted = st.form_submit_button("Update Post")
+        if submitted:
+            try:
+                new_scheduled_datetime = datetime.combine(new_date, new_time)
+                new_scheduled_datetime = pytz.timezone(new_timezone).localize(new_scheduled_datetime)
+            except Exception as e:
+                st.error(f"Error in scheduling datetime: {e}")
+                logger.error(f"Error updating post '{post['id']}': {e}")
+                return
+            now = datetime.now(pytz.timezone(new_timezone))
+            if new_scheduled_datetime <= now:
+                st.error("Scheduled time must be in the future!")
+                logger.warning(f"User attempted to update post '{post['id']}' to a past time.")
+                return
+            updated_caption = f"{new_caption}\nRead more at: {post['article_url']}" if post.get('article_url') else new_caption
+            updated_data = {
+                "caption": updated_caption,
+                "scheduled_time": new_scheduled_datetime.isoformat(),
+                "timezone": new_timezone
+            }
+            update_scheduled_post(email, post['id'], updated_data)
+            try:
+                scheduler.remove_job(post['id'])
+                logger.info(f"Removed job {post['id']} for rescheduling.")
+            except JobLookupError:
+                logger.warning(f"Job {post['id']} not found for removal.")
+            add_job(email, post['id'], post['image_path'], updated_caption, new_scheduled_datetime)
+            st.success("Scheduled post updated successfully!")
+            logger.info(f"Post {post['id']} updated for user {email}.")
+
+def delete_scheduled_post(email, post_id):
+    try:
+        scheduler.remove_job(post_id)
+        logger.info(f"Removed job {post_id} from scheduler.")
+    except JobLookupError:
+        logger.warning(f"Job {post_id} not found for removal.")
+    remove_scheduled_post(email, post_id)
+    st.success(f"Scheduled post {post_id} deleted successfully.")
+    logger.info(f"Post {post_id} deleted for user {email}.")
+
+def send_post_now(email, post_id):
+    """Immediately send the scheduled post identified by post_id."""
+    metrics = get_user_metrics(email)
+    scheduled_posts = metrics.get("scheduled_posts", [])
+    post = next((p for p in scheduled_posts if p['id'] == post_id), None)
+    if post is None:
+        st.error("Post not found.")
+        return
+    if post.get("posted", False):
+        st.warning("Post already sent.")
+        return
+    if TEST_MODE:
+        st.info("Simulated immediate sending of scheduled post.")
+        logger.info(f"Simulated sending post {post_id} immediately for user {email}.")
+        update_user_metric(email, "instagram_posts_scheduled", 1)
+        remove_scheduled_post(email, post_id)
+        return
+    try:
+        post_to_twitter(post["caption"])
+        post_to_instagram(post["caption"], image_path=post["image_path"])
+        st.success("Post sent immediately!")
+        logger.info(f"Sent post {post_id} immediately for user {email}.")
+        update_user_metric(email, "instagram_posts_scheduled", 1)
+        remove_scheduled_post(email, post_id)
+    except Exception as e:
+        st.error(f"Error sending post immediately: {e}")
+        logger.error(f"Error sending post {post_id} immediately for user {email}: {e}")
+
+def render_rss_feeds_page():
+    st.header("📰 RSS Feeds")
+    st.subheader("Explore the Latest News and Create Instagram Posts")
+    rss_feeds = {
+        "BBC News": "http://feeds.bbci.co.uk/news/rss.xml",
+        "CNN": "http://rss.cnn.com/rss/cnn_topstories.rss",
+        "Reuters": "http://feeds.reuters.com/reuters/topNews",
+    }
+    feed_name = st.selectbox("Choose a Feed", list(rss_feeds.keys()))
+    rss_url = rss_feeds[feed_name]
+    custom_rss_url = st.text_input("Custom RSS Feed URL (optional)", "")
+    if custom_rss_url:
+        rss_url = custom_rss_url
+    num_headlines = st.slider("Number of Headlines", 1, 10, 5)
+    if st.button("Fetch Headlines"):
+        st.subheader(f"Top {num_headlines} Headlines from {feed_name}")
+        st.session_state.rss_headlines = []
+        headlines = fetch_headlines(rss_url, limit=num_headlines)
+        if headlines:
+            progress_bar = st.progress(0)
+            total_headlines = len(headlines)
+            for idx, entry in enumerate(headlines):
+                st.markdown(f"### [{entry['title']}]({entry['link']})")
+                st.write(entry['summary'])
+                if entry['image_path']:
+                    st.image(entry['image_path'], caption="Fetched Image", use_container_width=True)
+                    st.session_state.rss_headlines.append(entry)
+                else:
+                    st.warning("No image available for this headline.")
+                update_user_metric(st.session_state.user_email, "rss_headlines_fetched", 1)
+                progress_bar.progress((idx + 1) / total_headlines)
+                time.sleep(0.5)
+            progress_bar.empty()
+            st.success("RSS headlines fetched successfully!")
+        else:
+            st.warning("No headlines found. Try another feed.")
+    if st.session_state.rss_headlines:
+        st.markdown("## 📸 Generated Instagram Posts from Headlines")
+        for idx, post in enumerate(st.session_state.rss_headlines, 1):
+            st.markdown(f"### Post {idx}")
+            if post.get('image_path') and os.path.exists(post['image_path']):
+                st.image(post['image_path'], caption=post['title'], use_container_width=True)
+                if st.button(f"Schedule Post {idx}", key=f"schedule_{idx}"):
+                    if "instagram_client" not in st.session_state or not st.session_state.instagram_client:
+                        st.error("Please login to Instagram first.")
+                        logger.warning("Attempted scheduling without Instagram login.")
+                    else:
+                        st.success("Please use the 'Instagram Scheduler' page to schedule this post.")
+                        logger.info(f"User chose to schedule post {idx} via Instagram Scheduler.")
+            else:
+                st.warning("Image not available for this headline.")
+
 def render_upgrade_page():
     st.header("💰 Upgrade Your Account")
     st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
@@ -491,7 +732,6 @@ def render_dashboard():
         if metrics.get("instagram_posts_scheduled", 0) >= thresholds.get("instagram_posts_scheduled", 5):
             st.warning("Upgrade to Premium to schedule more Instagram posts!")
 
-# ----------------------------- Main App Rendering -----------------------------
 def render_user_interface():
     menu = st.sidebar.radio("Navigation", ["Dashboard", "RSS Feeds", "Instagram Scheduler", "Upgrade"])
     if menu == "Dashboard":
@@ -535,7 +775,7 @@ def login_user():
 
 def main():
     st.title("🚀 Social Media Content Generator")
-    if not st.session_state.get("logged_in", False):
+    if not st.session_state.logged_in:
         st.sidebar.title("Authentication")
         auth_mode = st.sidebar.radio("Choose an option:", ["Login", "Register"])
         if auth_mode == "Register":
