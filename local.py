@@ -2,19 +2,19 @@
 Local Social Media Content Generator with Monetization
 
 Features:
-  • Local user registration and login (using JSON files)
-  • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
-  • RSS feed functionality with image downloading (feedparser, BeautifulSoup, requests, Pillow)
-  • Instagram posting via instagrapi with session saving (avoiding repeated 2FA)
-  • Twitter posting via tweepy
-  • Post scheduling via APScheduler
-  • Dashboard and navigation pages for RSS feeds, Instagram scheduling, and account upgrade
+  • Local user registration and login (using JSON files).
+  • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts).
+  • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow).
+  • Instagram posting via instagrapi with session saving (avoiding repeated 2FA prompts).
+  • Twitter posting via tweepy.
+  • Post scheduling via APScheduler.
+  • Dashboard and navigation pages for RSS feeds, Instagram scheduling, and account upgrade.
   • Stripe Checkout integration for monetization with two pricing tiers:
          - Premium: $9.99/month (unlimited features)
          - Pro: $19.99/month (acts as a decoy to make Premium more attractive)
-  • Global TEST_MODE flag to simulate external calls (no real payments or posts) for testing
+  • Global TEST_MODE flag to simulate external calls (no real payment or posting) during testing.
 
-Note: Replace all placeholder API keys (e.g. Stripe secret key) with your actual keys.
+Note: Replace all placeholder API keys (e.g. Stripe secret key) with your production values.
 """
 
 import os
@@ -39,17 +39,14 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-# Set TEST_MODE = True to simulate external calls (no real payment, no live posting).
-TEST_MODE = True
+TEST_MODE = True  # Set to False in production
 
-# Pricing tiers (psychologically optimized)
 PRICING_TIERS = {
     "Premium": 9.99,
     "Pro": 19.99
 }
 
-# Stripe configuration (replace with your actual Stripe secret key)
-stripe.api_key = "your_stripe_secret_key"
+stripe.api_key = "your_stripe_secret_key"  # Replace with your actual Stripe secret key
 
 # Local storage file paths
 USERS_FILE = "users.json"                # stores user credentials and role
@@ -226,7 +223,6 @@ def update_scheduled_post(email, post_id, updated_data):
 
 # ----------------------------- Stripe Payment Integration -----------------------------
 def create_stripe_checkout_session(username, plan):
-    """Create a Stripe Checkout session for the selected plan."""
     if TEST_MODE:
         logger.info("Simulated Stripe session created.")
         class DummySession:
@@ -254,7 +250,6 @@ def create_stripe_checkout_session(username, plan):
         st.error(f"Error creating Stripe session: {e}")
         return None
 
-# Payment verification on app load
 query_params = st.experimental_get_query_params()
 if "session_id" in query_params and "username" in query_params and "plan" in query_params:
     session_id = query_params["session_id"][0]
@@ -288,7 +283,6 @@ scheduler = init_scheduler()
 atexit.register(lambda: scheduler.shutdown())
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
-    """Upload the Instagram post at the scheduled time using a new Client instance."""
     if TEST_MODE:
         st.info("Simulated Instagram post upload.")
         logger.info(f"Simulated upload for post {post_id} for user {email}.")
@@ -315,7 +309,6 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         logger.error(f"Failed to upload scheduled Instagram post {post_id}: {e}")
 
 def add_job(email, post_id, image_path, caption, scheduled_time):
-    """Add a job to APScheduler."""
     try:
         scheduler.add_job(
             schedule_instagram_post,
@@ -331,7 +324,6 @@ def add_job(email, post_id, image_path, caption, scheduled_time):
         st.error(f"Failed to schedule post: {e}")
 
 def load_and_schedule_existing_posts(email):
-    """Load and schedule existing posts from local metrics storage."""
     metrics = get_user_metrics(email)
     scheduled_posts = metrics.get("scheduled_posts", [])
     for post in scheduled_posts:
@@ -351,7 +343,6 @@ def load_and_schedule_existing_posts(email):
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
-    """Fetch headlines and associated images from the RSS feed."""
     try:
         feed = feedparser.parse(rss_url)
         headlines = []
@@ -406,7 +397,6 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
         return []
 
 def download_image(image_url, image_dir="generated_posts"):
-    """Download an image from the given URL and save it locally."""
     try:
         response = requests.get(image_url, timeout=10)
         response.raise_for_status()
@@ -446,9 +436,8 @@ def render_instagram_scheduler_page():
                     os.makedirs("sessions")
                 session_file = f"sessions/{username}.json"
                 client.dump_settings(session_file)
-                client.dump_session(session_file)
-                logger.info(f"User {username} logged into Instagram; session saved.")
                 st.success("Logged into Instagram and session saved!")
+                logger.info(f"User {username} logged into Instagram; session saved.")
             except Exception as e:
                 st.error(f"Login failed: {e}")
                 logger.error(f"Instagram login failed for {username}: {e}")
@@ -642,6 +631,18 @@ def render_dashboard(metrics, thresholds):
         if metrics.get("instagram_posts_scheduled", 0) >= thresholds.get("instagram_posts_scheduled", 5):
             st.warning("Upgrade to Premium to schedule more Instagram posts!")
 
+# ----------------------------- Upgrade Page -----------------------------
+def render_upgrade_page():
+    st.header("💰 Upgrade Your Account")
+    st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
+    st.markdown("- **Premium:** $9.99/month (Unlimited features)")
+    st.markdown("- **Pro:** $19.99/month (Unlimited features with priority support)")
+    selected_plan = st.selectbox("Select your plan", list(PRICING_TIERS.keys()))
+    if st.button("Upgrade Now"):
+        session = create_stripe_checkout_session(st.session_state.user_email, selected_plan)
+        if session:
+            st.markdown(f"Please [click here to pay]({session.url}) to complete your upgrade.")
+
 # ----------------------------- RSS Feeds Rendering -----------------------------
 def render_rss_feeds_page():
     st.header("📰 RSS Feeds")
@@ -694,18 +695,6 @@ def render_rss_feeds_page():
                         logger.info(f"User chose to schedule post {idx} via Instagram Scheduler.")
             else:
                 st.warning("Image not available for this headline.")
-
-# ----------------------------- Upgrade Page -----------------------------
-def render_upgrade_page():
-    st.header("💰 Upgrade Your Account")
-    st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
-    st.markdown("- **Premium:** $9.99/month (Unlimited features)")
-    st.markdown("- **Pro:** $19.99/month (Unlimited features with priority support)")
-    selected_plan = st.selectbox("Select your plan", list(PRICING_TIERS.keys()))
-    if st.button("Upgrade Now"):
-        session = create_stripe_checkout_session(st.session_state.user_email, selected_plan)
-        if session:
-            st.markdown(f"Please [click here to pay]({session.url}) to complete your upgrade.")
 
 # ----------------------------- User Interface Rendering -----------------------------
 def render_user_interface():
