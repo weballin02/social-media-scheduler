@@ -3,16 +3,17 @@ Local Social Media Content Generator with Monetization
 
 Features:
   • Local user registration and login (using JSON files)
-  • Local user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
+  • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
   • RSS feed functionality with image downloading (feedparser, BeautifulSoup, requests, Pillow)
-  • Instagram posting via instagrapi with session saving (avoiding 2FA hassles)
+  • Instagram posting via instagrapi with session saving (avoiding repeated 2FA)
+  • Twitter posting via tweepy
   • Post scheduling via APScheduler
-  • A dashboard and separate pages for RSS feeds and Instagram scheduling
-  • Stripe Checkout integration for monetization with optimized pricing tiers:
-       – Free: Limited to 3 RSS feeds and 3 scheduled posts.
-       – Premium: $9.99/month — unlimited features.
-       – Pro: $19.99/month — (acts as a decoy to make Premium more attractive)
-       
+  • Dashboard and navigation pages for RSS feeds, Instagram scheduling, and account upgrade
+  • Stripe Checkout integration for monetization with two pricing tiers:
+         - Premium: $9.99/month (unlimited features)
+         - Pro: $19.99/month (acts as a decoy to make Premium more attractive)
+  • Global TEST_MODE flag to simulate external calls (no real payments or posts) for testing
+
 Note: Replace all placeholder API keys (e.g. Stripe secret key) with your actual keys.
 """
 
@@ -29,16 +30,32 @@ import feedparser
 import requests
 import tweepy
 from instagrapi import Client
-
 from PIL import Image
 from io import BytesIO
 from bs4 import BeautifulSoup
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import pytz
-
 import stripe
+
+# ----------------------------- Global Configuration -----------------------------
+# Set TEST_MODE = True to simulate external calls (no real payment, no live posting).
+TEST_MODE = True
+
+# Pricing tiers (psychologically optimized)
+PRICING_TIERS = {
+    "Premium": 9.99,
+    "Pro": 19.99
+}
+
+# Stripe configuration (replace with your actual Stripe secret key)
+stripe.api_key = "your_stripe_secret_key"
+
+# Local storage file paths
+USERS_FILE = "users.json"                # stores user credentials and role
+USER_METRICS_FILE = "user_metrics.json"    # stores per-user metrics
+RSS_FEEDS_FILE = "user_rss_feeds.json"       # stores user-saved RSS feeds
+POSTS_FILE = "scheduled_posts.json"          # stores scheduled posts
 
 # ----------------------------- Logging Configuration -----------------------------
 logging.basicConfig(
@@ -48,22 +65,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
-# ----------------------------- Local Storage Files -----------------------------
-USERS_FILE = "users.json"                # Stores user credentials and role
-USER_METRICS_FILE = "user_metrics.json"    # Stores per-user metrics
-RSS_FEEDS_FILE = "user_rss_feeds.json"       # Stores user-saved RSS feeds
-POSTS_FILE = "scheduled_posts.json"          # Stores scheduled posts
-
-# ----------------------------- Pricing Tiers (Psychologically Optimized) -----------------------------
-# We use $9.99 (Premium) and $19.99 (Pro) to create a decoy effect
-PRICING_TIERS = {
-    "Premium": 9.99,
-    "Pro": 19.99
-}
-
-# ----------------------------- Stripe Configuration -----------------------------
-stripe.api_key = "your_stripe_secret_key"  # Replace with your actual Stripe secret key
 
 # ----------------------------- Helper Function for Rerun -----------------------------
 def rerun_app():
@@ -101,8 +102,7 @@ def load_users():
         except Exception as e:
             st.error(f"Error loading users: {e}")
             return {}
-    else:
-        return {}
+    return {}
 
 def save_users(users):
     try:
@@ -143,7 +143,7 @@ def login_user_local(email, password):
 def upgrade_user_plan(username, plan):
     users = load_users()
     if username in users:
-        users[username]["role"] = plan  # Set role to either "Premium" or "Pro"
+        users[username]["role"] = plan  # plan is either "Premium" or "Pro"
         save_users(users)
         st.session_state.user_role = plan
         logger.info(f"User {username} upgraded to {plan}")
@@ -159,8 +159,7 @@ def load_user_metrics():
         except Exception as e:
             st.error(f"Error loading user metrics: {e}")
             return {}
-    else:
-        return {}
+    return {}
 
 def save_user_metrics(metrics):
     try:
@@ -228,8 +227,14 @@ def update_scheduled_post(email, post_id, updated_data):
 # ----------------------------- Stripe Payment Integration -----------------------------
 def create_stripe_checkout_session(username, plan):
     """Create a Stripe Checkout session for the selected plan."""
+    if TEST_MODE:
+        logger.info("Simulated Stripe session created.")
+        class DummySession:
+            payment_status = "paid"
+            url = "https://example.com/simulated-checkout"
+        return DummySession()
     try:
-        unit_amount = int(PRICING_TIERS[plan] * 100)  # in cents
+        unit_amount = int(PRICING_TIERS[plan] * 100)
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
             line_items=[{
@@ -255,14 +260,19 @@ if "session_id" in query_params and "username" in query_params and "plan" in que
     session_id = query_params["session_id"][0]
     username_param = query_params["username"][0]
     plan_param = query_params["plan"][0]
-    try:
-        session = stripe.checkout.Session.retrieve(session_id)
-        if session.payment_status == "paid":
-            upgrade_user_plan(username_param, plan_param)
-            st.success(f"🎉 Upgrade successful! You are now a {plan_param} user.")
-            st.experimental_set_query_params()  # Clear query parameters
-    except Exception as e:
-        st.error(f"Error verifying payment: {e}")
+    if TEST_MODE:
+        upgrade_user_plan(username_param, plan_param)
+        st.success(f"Simulated upgrade: You are now a {plan_param} user.")
+        st.experimental_set_query_params()
+    else:
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+            if session.payment_status == "paid":
+                upgrade_user_plan(username_param, plan_param)
+                st.success(f"🎉 Upgrade successful! You are now a {plan_param} user.")
+                st.experimental_set_query_params()
+        except Exception as e:
+            st.error(f"Error verifying payment: {e}")
 
 # ----------------------------- APScheduler Initialization -----------------------------
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -279,6 +289,10 @@ atexit.register(lambda: scheduler.shutdown())
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
     """Upload the Instagram post at the scheduled time using a new Client instance."""
+    if TEST_MODE:
+        st.info("Simulated Instagram post upload.")
+        logger.info(f"Simulated upload for post {post_id} for user {email}.")
+        return
     try:
         client = Client()
         session_dir = "sessions"
@@ -392,7 +406,7 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
         return []
 
 def download_image(image_url, image_dir="generated_posts"):
-    """Download an image from a URL and save it locally."""
+    """Download an image from the given URL and save it locally."""
     try:
         response = requests.get(image_url, timeout=10)
         response.raise_for_status()
@@ -681,6 +695,18 @@ def render_rss_feeds_page():
             else:
                 st.warning("Image not available for this headline.")
 
+# ----------------------------- Upgrade Page -----------------------------
+def render_upgrade_page():
+    st.header("💰 Upgrade Your Account")
+    st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
+    st.markdown("- **Premium:** $9.99/month (Unlimited features)")
+    st.markdown("- **Pro:** $19.99/month (Unlimited features with priority support)")
+    selected_plan = st.selectbox("Select your plan", list(PRICING_TIERS.keys()))
+    if st.button("Upgrade Now"):
+        session = create_stripe_checkout_session(st.session_state.user_email, selected_plan)
+        if session:
+            st.markdown(f"Please [click here to pay]({session.url}) to complete your upgrade.")
+
 # ----------------------------- User Interface Rendering -----------------------------
 def render_user_interface():
     menu = st.sidebar.radio("Navigation", ["Dashboard", "RSS Feeds", "Instagram Scheduler", "Upgrade"])
@@ -694,22 +720,6 @@ def render_user_interface():
         render_instagram_scheduler_page()
     elif menu == "Upgrade":
         render_upgrade_page()
-
-# ----------------------------- Upgrade Page with Stripe Integration -----------------------------
-def render_upgrade_page():
-    st.header("💰 Upgrade Your Account")
-    st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
-    st.markdown("Choose from our enticing plans:")
-    st.markdown("- **Premium:** $9.99/month (Unlimited features)")
-    st.markdown("- **Pro:** $19.99/month (Unlimited features with priority support)")
-    selected_plan = st.selectbox("Select your plan", list(PRICING_TIERS.keys()))
-    if st.button("Upgrade Now"):
-        session = create_stripe_checkout_session(st.session_state.user_email, selected_plan)
-        if session:
-            st.markdown(f"Please [click here to pay]({session.url}) to complete your upgrade.")
-
-# ----------------------------- RSS Feeds and Instagram Scheduler Helper Functions -----------------------------
-# (The functions fetch_headlines, download_image, etc. are already defined above.)
 
 # ----------------------------- Authentication Functions -----------------------------
 def register_user():
