@@ -3,63 +3,52 @@ Local Social Media Content Generator
 
 This is a production-ready, standalone version of the Social Media Scheduler.
 It features:
-  - Local user registration and login (using JSON files instead of Firebase)
-  - Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
-  - RSS feed functionality with image downloading
-  - Instagram posting using instagrapi with session saving (avoiding 2FA prompts)
-  - Scheduling of posts via APScheduler and Selenium for article scraping
-  - A dashboard and separate pages for RSS feeds and Instagram scheduling
-  - Logging of events
+  - Local user registration and login (using JSON files for storage).
+  - Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts).
+  - RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow).
+  - Instagram posting using instagrapi with session saving (to avoid manual 2FA prompts).
+  - Scheduling of posts via APScheduler.
+  - A dashboard and separate pages for RSS feeds and Instagram scheduling.
+  - Logging of events.
 
-Requirements: see requirements.txt
+Requirements: See requirements.txt
 """
 
 import os
 import json
 import time
 import threading
-import atexit
-import logging
 from datetime import datetime
 
 import streamlit as st
 import feedparser
 import requests
-from instagrapi import Client
 import tweepy
+from instagrapi import Client
 
-# Selenium and related imports
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
-
-# Pillow and BeautifulSoup for image and HTML parsing
 from PIL import Image
 from io import BytesIO
 from bs4 import BeautifulSoup
 
-# APScheduler for scheduling posts
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
-
-# pytz for timezone handling
 import pytz
+import logging
 
 # ----------------------------- Logging Configuration -----------------------------
 logging.basicConfig(
-    filename='app.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename='app.log',  
+    level=logging.INFO,  
+    format='%(asctime)s - %(levelname)s - %(message)s',  
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
 # ----------------------------- Local Storage Files -----------------------------
-USERS_FILE = "users.json"            # for storing user credentials and role
-USER_METRICS_FILE = "user_metrics.json"  # for storing per-user metrics
-RSS_FEEDS_FILE = "user_rss_feeds.json"    # for storing user-saved RSS feeds
-POSTS_FILE = "scheduled_posts.json"       # for storing scheduled posts
+USERS_FILE = "users.json"               # stores user credentials and role
+USER_METRICS_FILE = "user_metrics.json"   # stores per-user metrics
+RSS_FEEDS_FILE = "user_rss_feeds.json"      # stores user-saved RSS feeds
+POSTS_FILE = "scheduled_posts.json"         # stores scheduled posts
 
 # ----------------------------- Helper Function for Rerun -----------------------------
 def rerun_app():
@@ -211,44 +200,7 @@ def update_scheduled_post(email, post_id, updated_data):
         save_user_metrics(metrics)
         logger.info(f"Updated scheduled post {post_id} for user {email}: {updated_data}")
 
-# ----------------------------- Selenium WebDriver Initialization -----------------------------
-from selenium.webdriver.chrome.options import Options
-
-@st.cache_resource(show_spinner=False)
-def init_selenium_driver():
-    """Initialize and return a Selenium WebDriver using webdriver-manager."""
-    try:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        logger.info("Selenium WebDriver initialized.")
-        return driver
-    except Exception as e:
-        logger.error(f"Selenium WebDriver initialization failed: {e}")
-        st.error(f"Selenium WebDriver initialization failed: {e}")
-        st.stop()
-
-driver = init_selenium_driver()
-atexit.register(lambda: driver.quit())
-
-def scrape_article_content(url):
-    """Fetch and return the main content from an article URL using Selenium."""
-    try:
-        driver.get(url)
-        time.sleep(3)
-        paragraphs = driver.find_elements(By.TAG_NAME, "p")
-        content = " ".join([p.text for p in paragraphs])
-        logger.info(f"Scraped content from {url}")
-        return content.strip()
-    except Exception as e:
-        logger.error(f"Failed to scrape content from {url}: {e}")
-        st.error(f"Failed to scrape content from {url}: {e}")
-        return ""
-
-# ----------------------------- Scheduler Initialization -----------------------------
+# ----------------------------- APScheduler Initialization -----------------------------
 from apscheduler.schedulers.background import BackgroundScheduler
 
 @st.cache_resource(show_spinner=False)
@@ -259,13 +211,18 @@ def init_scheduler():
     return scheduler
 
 scheduler = init_scheduler()
+# Ensure scheduler shuts down on exit
+import atexit
 atexit.register(lambda: scheduler.shutdown())
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
     """Upload the Instagram post at the scheduled time using a new Client instance."""
     try:
         client = Client()
-        session_file = f"sessions/{email}.json"
+        session_dir = "sessions"
+        if not os.path.exists(session_dir):
+            os.makedirs(session_dir)
+        session_file = os.path.join(session_dir, f"{insta_username}.json")
         if os.path.exists(session_file):
             client.load_settings(session_file)
             client.login(insta_username, insta_password)
@@ -318,7 +275,7 @@ def load_and_schedule_existing_posts(email):
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
-    """Fetch headlines and attempt to download an image for each from the RSS feed."""
+    """Fetch headlines (and associated images) from the RSS feed."""
     try:
         feed = feedparser.parse(rss_url)
         headlines = []
@@ -379,7 +336,7 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
         return []
 
 def download_image(image_url, image_dir="generated_posts"):
-    """Download an image from the given URL and save it locally."""
+    """Download an image from a URL and save it locally."""
     try:
         response = requests.get(image_url, timeout=10)
         response.raise_for_status()
@@ -402,12 +359,10 @@ def download_image(image_url, image_dir="generated_posts"):
 def render_instagram_scheduler_page():
     st.header("📅 Instagram Scheduler")
     st.subheader("Plan and Automate Your Instagram Content")
-
     username = st.text_input("Instagram Username")
     password = st.text_input("Instagram Password", type="password")
     image_directory = st.text_input("Image Directory", "generated_posts")
     timezone = st.selectbox("Select Timezone", pytz.all_timezones, index=pytz.all_timezones.index('UTC'))
-
     if st.button("Login to Instagram"):
         if not username or not password:
             st.error("Please provide Instagram credentials!")
@@ -427,27 +382,21 @@ def render_instagram_scheduler_page():
             except Exception as e:
                 st.error(f"Login failed: {e}")
                 logger.error(f"Instagram login failed for {username}: {e}")
-
     st.markdown("---")
     st.subheader("📅 Schedule New Instagram Posts")
-
     if st.session_state.user_email:
         metrics = get_user_metrics(st.session_state.user_email)
         scheduled_posts = metrics.get("scheduled_posts", [])
     else:
         scheduled_posts = []
-
     fetched_headlines = st.session_state.rss_headlines
     scheduled_captions = [post.get('caption', '').replace(f" Read more at: {post.get('article_url', '')}", '') for post in scheduled_posts]
     unscheduled_headlines = [headline for headline in fetched_headlines if headline['title'] not in scheduled_captions]
-
     if not unscheduled_headlines:
         st.info("No unscheduled posts available. Fetch more headlines or schedule existing posts.")
         return
-
     title_to_headline = {headline['title']: headline for headline in unscheduled_headlines}
     selected_titles = st.multiselect("Select Post(s) to Schedule", options=list(title_to_headline.keys()))
-
     if selected_titles:
         for title in selected_titles:
             headline = title_to_headline[title]
