@@ -1,5 +1,11 @@
 streamlit
+firebase-admin
 feedparser
-tweepy
+requests
 instagrapi
-stripe
+selenium
+webdriver-manager
+Pillow
+beautifulsoup4
+APScheduler
+pytz
