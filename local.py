@@ -1,5 +1,5 @@
 """
-Local Social Media Content Generator with Monetization, Immediate Send, and One-Click Login
+Local Social Media Content Generator with Monetization, Immediate Send, and Updated Query Parameters
 
 Features:
   • Local user registration and login (using JSON files)
@@ -14,8 +14,8 @@ Features:
          - Pro: $19.99/month (acts as a decoy to make Premium more attractive)
   • Global TEST_MODE flag to simulate external calls (no real payment or posting) during testing
   • "Send Now" functionality for scheduled posts
-  • **One-Click Login:** After a successful login, the app immediately refreshes to show the dashboard.
-  
+  • Uses st.query_params (instead of the deprecated experimental API)
+
 Note: Replace all placeholder API keys (e.g. Stripe secret key) with your production values.
 """
 
@@ -373,6 +373,31 @@ def send_post_now(email, post_id):
     except Exception as e:
         st.error(f"Error sending post immediately: {e}")
         logger.error(f"Error sending post {post_id} immediately for user {email}: {e}")
+
+# (You should implement post_to_twitter and post_to_instagram in your real integration.
+# For brevity, if not needed, assume they are defined similarly to schedule_instagram_post.)
+def post_to_twitter(content):
+    if TEST_MODE:
+        st.info("Simulated Twitter post successful.")
+        logger.info("Simulated Twitter post.")
+        return
+    try:
+        tweepy.API().update_status(content)
+        st.info("Posted to Twitter successfully.")
+    except Exception as e:
+        st.error(f"Twitter posting failed: {e}")
+
+def post_to_instagram(content, image_path= None):
+    if TEST_MODE:
+        st.info("Simulated Instagram post successful.")
+        logger.info("Simulated Instagram post.")
+        return
+    try:
+        # Here you would call the actual Instagram posting code if not in test mode.
+        Client().photo_upload(image_path, content)
+        st.info("Posted to Instagram successfully.")
+    except Exception as e:
+        st.error(f"Instagram posting failed: {e}")
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
@@ -775,7 +800,7 @@ def login_user():
             logger.warning("Login attempted with missing email or password.")
         else:
             if login_user_local(email, password):
-                rerun_app()  # Immediately refresh the app after successful login
+                rerun_app()
 
 # ----------------------------- Main Application Logic -----------------------------
 def main():
