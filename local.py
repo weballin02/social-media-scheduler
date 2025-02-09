@@ -5,7 +5,7 @@ Features:
   • Local user registration and login (using JSON files)
   • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
   • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow)
-  • Instagram posting via instagrapi (with a global client to avoid token issues)
+  • Instagram posting via instagrapi (with a global client to avoid token issues and automatic relogin)
   • Twitter posting via tweepy
   • Post scheduling via APScheduler (jobs run in background threads)
   • A dashboard and separate pages for RSS feeds, Instagram scheduling, and account upgrade
@@ -248,7 +248,6 @@ def create_stripe_checkout_session(username, plan):
                 'quantity': 1,
             }],
             mode='payment',
-            # Replace these URLs with your deployed app URL.
             success_url=f"http://your-app-url/?session_id={{CHECKOUT_SESSION_ID}}&username={username}&plan={plan}",
             cancel_url="http://your-app-url/?cancel=1",
         )
@@ -338,7 +337,6 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
             global_instagram_client.photo_upload(image_path, caption)
         except Exception as e:
             logger.error(f"Initial Instagram post failed for {post_id}: {e}")
-            # Attempt to refresh token and retry
             global_instagram_client.relogin()
             global_instagram_client.photo_upload(image_path, caption)
         logger.info(f"Scheduled Instagram post {post_id} uploaded.")
@@ -439,7 +437,6 @@ def render_instagram_scheduler_page():
                 client = Client()
                 client.login(insta_username, insta_password)
                 st.session_state.instagram_client = client
-                # Set the global client variable for background jobs
                 global global_instagram_client
                 global_instagram_client = client
                 if not os.path.exists("sessions"):
