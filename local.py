@@ -1,6 +1,6 @@
 """
 Local Social Media Content Generator with Monetization
-(Added "Send Now" functionality for scheduled posts)
+(Updated to use st.query_params and single-click login)
 """
 
 import os
@@ -25,7 +25,7 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-TEST_MODE = False  # Toggle to True to simulate external calls (no real payment or posting)
+TEST_MODE = True  # Toggle to True to simulate external calls (no real payment or posting)
 
 PRICING_TIERS = {
     "Premium": 9.99,
@@ -66,7 +66,6 @@ if "rss_headlines" not in st.session_state:
 if "instagram_client" not in st.session_state:
     st.session_state.instagram_client = None
 
-# ### NEW/CHANGED CODE ###
 # We'll store IG credentials in session_state
 if "ig_username" not in st.session_state:
     st.session_state.ig_username = None
@@ -119,8 +118,12 @@ def login_user_local(email, password):
     st.success(f"Logged in as {st.session_state.user_role} user!")
     logger.info(f"User logged in: {email}")
 
-    # Load any scheduled Instagram posts the user had from before
     load_and_schedule_existing_posts(email)
+
+    # ### CHANGED/NEW CODE ###
+    # Force a rerun so the UI moves the user to the main dashboard automatically.
+    st.experimental_rerun()
+
     return True
 
 def upgrade_user_plan(username, plan):
@@ -238,23 +241,26 @@ def create_stripe_checkout_session(username, plan):
         st.error(f"Error creating Stripe session: {e}")
         return None
 
+# ### CHANGED/NEW CODE ###
+# Use st.query_params instead of st.experimental_get_query_params
 # Payment verification on app load
-query_params = st.experimental_get_query_params()
+query_params = st.query_params
 if "session_id" in query_params and "username" in query_params and "plan" in query_params:
-    session_id = query_params["session_id"][0]
-    username_param = query_params["username"][0]
-    plan_param = query_params["plan"][0]
+    session_id = query_params["session_id"]
+    username_param = query_params["username"]
+    plan_param = query_params["plan"]
     if TEST_MODE:
         upgrade_user_plan(username_param, plan_param)
         st.success(f"Simulated upgrade: You are now a {plan_param} user.")
-        st.experimental_set_query_params()
+        # Clear query params
+        st.query_params.clear()
     else:
         try:
             session = stripe.checkout.Session.retrieve(session_id)
             if session.payment_status == "paid":
                 upgrade_user_plan(username_param, plan_param)
                 st.success(f"🎉 Upgrade successful! You are now a {plan_param} user.")
-                st.experimental_set_query_params()
+                st.query_params.clear()
         except Exception as e:
             st.error(f"Error verifying payment: {e}")
 
@@ -296,9 +302,6 @@ def login_to_instagram(username, password):
         return False
 
 def post_to_instagram(image_path, caption):
-    """
-    Actually uploads the photo. We assume `client` is properly logged in.
-    """
     global client
     try:
         client.photo_upload(image_path, caption)
@@ -309,9 +312,6 @@ def post_to_instagram(image_path, caption):
         return False
 
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
-    """
-    APScheduler job function. Re-logins (if needed), then calls `post_to_instagram`.
-    """
     if TEST_MODE:
         st.info("Simulated Instagram post upload.")
         logger.info(f"Simulated upload for post {post_id} for user {email}.")
@@ -347,7 +347,6 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         logger.error(f"Exception in schedule_instagram_post: {e}")
 
 def add_job(email, post_id, image_path, caption, scheduled_time):
-    """Add a job to APScheduler for a one-time date-based schedule."""
     try:
         scheduler.add_job(
             schedule_instagram_post,
@@ -363,7 +362,6 @@ def add_job(email, post_id, image_path, caption, scheduled_time):
         st.error(f"Failed to schedule post: {e}")
 
 def load_and_schedule_existing_posts(email):
-    """Load previously scheduled posts from local metrics and re-add them to APScheduler."""
     metrics = get_user_metrics(email)
     scheduled_posts = metrics.get("scheduled_posts", [])
     for post in scheduled_posts:
@@ -382,56 +380,6 @@ def load_and_schedule_existing_posts(email):
             else:
                 logger.info(f"Post {post_id} time has passed. Uploading immediately.")
                 schedule_instagram_post(email, post_id, image_path, caption, now_in_zone)
-
-# ### NEW/CHANGED CODE ###
-def send_post_now(email, post):
-    """
-    Immediately post the scheduled item to Instagram, bypassing scheduling.
-    Similar to schedule_instagram_post, but no APScheduler or time checks.
-    """
-    if TEST_MODE:
-        st.info("Simulated Instagram post upload (Send Now).")
-        logger.info(f"[SEND NOW] Simulated upload for post {post['id']} for user {email}.")
-        return
-
-    try:
-        ig_username = st.session_state.get("ig_username")
-        ig_password = st.session_state.get("ig_password")
-        session_dir = "sessions"
-
-        if not ig_username or not ig_password:
-            logger.error(f"No IG credentials for user {email}. Cannot send now.")
-            st.error("No Instagram credentials available. Please log in first.")
-            return
-
-        session_file = os.path.join(session_dir, f"{ig_username}.json")
-        if os.path.exists(session_file):
-            client.load_settings(session_file)
-            client.login(ig_username, ig_password)
-            logger.info(f"[SEND NOW] Re-logged in via session for IG user {ig_username}")
-        else:
-            logger.error(f"No session file found for {ig_username}. Cannot send now.")
-            st.error(f"No saved session for {ig_username}. Please log in again.")
-            return
-
-        success = post_to_instagram(post['image_path'], post['caption'])
-        if success:
-            update_user_metric(email, "instagram_posts_scheduled", 1)
-            remove_scheduled_post(email, post['id'])
-            # Remove APScheduler job if it exists
-            try:
-                scheduler.remove_job(post['id'])
-                logger.info(f"Removed scheduled job {post['id']} due to immediate post.")
-            except JobLookupError:
-                logger.info(f"No APScheduler job found for {post['id']} - it might not have been scheduled.")
-            logger.info(f"[SEND NOW] Instagram post {post['id']} posted immediately, removed from queue.")
-            st.success(f"Post {post['id']} sent to Instagram immediately!")
-        else:
-            logger.error(f"Failed to send post {post['id']} now.")
-            st.error("Failed to post immediately. Check logs for details.")
-    except Exception as e:
-        logger.error(f"Exception in send_post_now: {e}")
-        st.error(f"Error posting immediately: {e}")
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
@@ -619,22 +567,13 @@ def render_instagram_scheduler_page():
     if scheduled_posts:
         for post in scheduled_posts:
             with st.expander(f"Post ID: {post['id']}"):
-                col1, col2, col3 = st.columns([1, 1, 2])  # ### NEW/CHANGED: 3 columns for buttons
+                col1, col2 = st.columns([1, 2])
                 with col1:
                     if post['image_path'] and os.path.exists(post['image_path']):
                         st.image(post['image_path'], use_container_width=True)
                     else:
                         st.warning("Image not available.")
                 with col2:
-                    # ### NEW/CHANGED CODE ###
-                    # Add a "Send Now" button for immediate posting
-                    if st.button(f"Send Now {post['id']}", key=f"send_now_{post['id']}"):
-                        send_post_now(st.session_state.user_email, post)
-
-                    # "Delete" button
-                    if st.button(f"Delete {post['id']}", key=f"delete_{post['id']}"):
-                        delete_scheduled_post(email=st.session_state.user_email, post_id=post['id'])
-                with col3:
                     st.markdown(f"**Caption:** {post['caption']}")
                     st_time = datetime.fromisoformat(post['scheduled_time'])
                     st.markdown(f"**Scheduled Time:** {st_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -643,9 +582,13 @@ def render_instagram_scheduler_page():
                     else:
                         st.markdown("**Article URL:** Not available")
 
-                    if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
-                        edit_scheduled_post(email=st.session_state.user_email, post=post)
-
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
+                            edit_scheduled_post(email=st.session_state.user_email, post=post)
+                    with col_b:
+                        if st.button(f"Delete {post['id']}", key=f"delete_{post['id']}"):
+                            delete_scheduled_post(email=st.session_state.user_email, post_id=post['id'])
     else:
         st.info("No scheduled posts found.")
 
@@ -764,8 +707,8 @@ def render_dashboard(metrics, thresholds):
 def render_rss_feeds_page():
     st.header("📰 RSS Feeds")
     st.subheader("Explore the Latest News and Create Instagram Posts")
-    
-    # Replace or expand your existing feed dictionary with these popular RSS feeds:
+
+    # Updated list of high-demand RSS feeds:
     rss_feeds = {
         "BBC News (World)": "http://feeds.bbci.co.uk/news/world/rss.xml",
         "CNN Top Stories": "http://rss.cnn.com/rss/cnn_topstories.rss",
@@ -777,21 +720,17 @@ def render_rss_feeds_page():
         "The Verge": "https://www.theverge.com/rss/index.xml",
         "MarketWatch": "http://feeds.marketwatch.com/marketwatch/topstories/"
     }
-    
+
     feed_name = st.selectbox("Choose a Feed", list(rss_feeds.keys()))
     rss_url = rss_feeds[feed_name]
-    
-    # Allow users to override with a custom feed if they wish:
     custom_rss_url = st.text_input("Custom RSS Feed URL (optional)", "")
     if custom_rss_url:
         rss_url = custom_rss_url
-    
+
     num_headlines = st.slider("Number of Headlines", 1, 10, 5)
-    
     if st.button("Fetch Headlines"):
         st.subheader(f"Top {num_headlines} Headlines from {feed_name}")
         st.session_state.rss_headlines = []
-        
         headlines = fetch_headlines(rss_url, limit=num_headlines)
         if headlines:
             progress_bar = st.progress(0)
@@ -804,16 +743,31 @@ def render_rss_feeds_page():
                     st.session_state.rss_headlines.append(entry)
                 else:
                     st.warning("No image available for this headline.")
-                
-                # Update usage metric and progress
+
                 update_user_metric(st.session_state.user_email, "rss_headlines_fetched", 1)
                 progress_bar.progress((idx + 1) / total_headlines)
                 time.sleep(0.5)
-            
             progress_bar.empty()
             st.success("RSS headlines fetched successfully!")
         else:
             st.warning("No headlines found. Try another feed.")
+
+    if st.session_state.rss_headlines:
+        st.markdown("## 📸 Generated Instagram Posts from Headlines")
+        for idx, post in enumerate(st.session_state.rss_headlines, 1):
+            st.markdown(f"### Post {idx}")
+            if post.get('image_path') and os.path.exists(post['image_path']):
+                st.image(post['image_path'], caption=post['title'], use_container_width=True)
+                if st.button(f"Schedule Post {idx}", key=f"schedule_{idx}"):
+                    if not st.session_state.instagram_client:
+                        st.error("Please login to Instagram first.")
+                        logger.warning("Attempted scheduling without Instagram login.")
+                    else:
+                        st.success("Please use the 'Instagram Scheduler' page to schedule this post.")
+                        logger.info(f"User chose to schedule post {idx} via Instagram Scheduler.")
+            else:
+                st.warning("Image not available for this headline.")
+
 # ----------------------------- Upgrade Page -----------------------------
 def render_upgrade_page():
     st.header("💰 Upgrade Your Account")
