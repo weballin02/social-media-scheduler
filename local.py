@@ -1,6 +1,6 @@
 """
 Local Social Media Content Generator with Monetization
-(Instagram credentials via UI, session file named by user)
+(Added "Send Now" functionality for scheduled posts)
 """
 
 import os
@@ -39,7 +39,7 @@ USER_METRICS_FILE = "user_metrics.json"
 RSS_FEEDS_FILE = "user_rss_feeds.json"
 POSTS_FILE = "scheduled_posts.json"
 
-# Create a global instagrapi Client (as in your snippet)
+# Create a global instagrapi Client
 client = Client()
 
 # ----------------------------- Logging Configuration -----------------------------
@@ -66,7 +66,8 @@ if "rss_headlines" not in st.session_state:
 if "instagram_client" not in st.session_state:
     st.session_state.instagram_client = None
 
-# IMPORTANT: We'll store the IG username/password for scheduling
+# ### NEW/CHANGED CODE ###
+# We'll store IG credentials in session_state
 if "ig_username" not in st.session_state:
     st.session_state.ig_username = None
 if "ig_password" not in st.session_state:
@@ -268,9 +269,7 @@ def init_scheduler():
 scheduler = init_scheduler()
 atexit.register(lambda: scheduler.shutdown())
 
-# ----------------------------------------------------------------
-#    NEW, UI-DRIVEN INSTAGRAM LOGIN/POSTING FUNCTIONS
-# ----------------------------------------------------------------
+# ----------------------------- Instagram Logic -----------------------------
 def login_to_instagram(username, password):
     """
     Saves a local JSON session file named after `username`.
@@ -282,17 +281,13 @@ def login_to_instagram(username, password):
         os.makedirs(session_dir)
 
     session_file = os.path.join(session_dir, f"{username}.json")
-
     try:
         if os.path.exists(session_file):
-            # If a session file exists, load its settings:
             client.load_settings(session_file)
             client.login(username, password)
             logger.info(f"Loaded existing Instagram session file for {username}.")
         else:
-            # Otherwise, do a fresh login
             client.login(username, password)
-            # Save the new session settings for future re-logins
             client.dump_settings(session_file)
             logger.info(f"Created new Instagram session file for {username}.")
         return True
@@ -323,9 +318,6 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         return
 
     try:
-        # Retrieve the stored IG username from session_state
-        # The app might only have one "active" user each time,
-        # so we rely on st.session_state if it's the same process.
         session_dir = "sessions"
         ig_username = st.session_state.get("ig_username")
         ig_password = st.session_state.get("ig_password")
@@ -334,19 +326,16 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
             logger.error(f"No IG username in session_state for user {email}. Cannot auto-post.")
             return
 
-        # Attempt to load the relevant session file
         session_file = os.path.join(session_dir, f"{ig_username}.json")
         if os.path.exists(session_file):
             client.load_settings(session_file)
             if ig_password:
-                # Re-login with the password to refresh the session
                 client.login(ig_username, ig_password)
             logger.info(f"[schedule_instagram_post] Re-logged in via session for IG user {ig_username}")
         else:
             logger.error(f"No session file found for {ig_username}. Cannot auto-post.")
             return
 
-        # Perform the actual posting
         success = post_to_instagram(image_path, caption)
         if success:
             update_user_metric(email, "instagram_posts_scheduled", 1)
@@ -385,16 +374,64 @@ def load_and_schedule_existing_posts(email):
         timezone = post['timezone']
         scheduled_time = pytz.timezone(timezone).localize(scheduled_time)
 
-        # If no job is scheduled yet with this ID, schedule it
         if not scheduler.get_job(post_id):
             now_in_zone = datetime.now(pytz.timezone(timezone))
             if scheduled_time > now_in_zone:
                 add_job(email, post_id, image_path, caption, scheduled_time)
                 logger.info(f"Loaded and scheduled post {post_id} for {email}")
             else:
-                # If the time is in the past, post immediately
                 logger.info(f"Post {post_id} time has passed. Uploading immediately.")
                 schedule_instagram_post(email, post_id, image_path, caption, now_in_zone)
+
+# ### NEW/CHANGED CODE ###
+def send_post_now(email, post):
+    """
+    Immediately post the scheduled item to Instagram, bypassing scheduling.
+    Similar to schedule_instagram_post, but no APScheduler or time checks.
+    """
+    if TEST_MODE:
+        st.info("Simulated Instagram post upload (Send Now).")
+        logger.info(f"[SEND NOW] Simulated upload for post {post['id']} for user {email}.")
+        return
+
+    try:
+        ig_username = st.session_state.get("ig_username")
+        ig_password = st.session_state.get("ig_password")
+        session_dir = "sessions"
+
+        if not ig_username or not ig_password:
+            logger.error(f"No IG credentials for user {email}. Cannot send now.")
+            st.error("No Instagram credentials available. Please log in first.")
+            return
+
+        session_file = os.path.join(session_dir, f"{ig_username}.json")
+        if os.path.exists(session_file):
+            client.load_settings(session_file)
+            client.login(ig_username, ig_password)
+            logger.info(f"[SEND NOW] Re-logged in via session for IG user {ig_username}")
+        else:
+            logger.error(f"No session file found for {ig_username}. Cannot send now.")
+            st.error(f"No saved session for {ig_username}. Please log in again.")
+            return
+
+        success = post_to_instagram(post['image_path'], post['caption'])
+        if success:
+            update_user_metric(email, "instagram_posts_scheduled", 1)
+            remove_scheduled_post(email, post['id'])
+            # Remove APScheduler job if it exists
+            try:
+                scheduler.remove_job(post['id'])
+                logger.info(f"Removed scheduled job {post['id']} due to immediate post.")
+            except JobLookupError:
+                logger.info(f"No APScheduler job found for {post['id']} - it might not have been scheduled.")
+            logger.info(f"[SEND NOW] Instagram post {post['id']} posted immediately, removed from queue.")
+            st.success(f"Post {post['id']} sent to Instagram immediately!")
+        else:
+            logger.error(f"Failed to send post {post['id']} now.")
+            st.error("Failed to post immediately. Check logs for details.")
+    except Exception as e:
+        logger.error(f"Exception in send_post_now: {e}")
+        st.error(f"Error posting immediately: {e}")
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
@@ -480,7 +517,6 @@ def render_instagram_scheduler_page():
     st.header("📅 Instagram Scheduler")
     st.subheader("Plan and Automate Your Instagram Content")
 
-    # Prompt the user for their IG credentials
     username = st.text_input("Instagram Username", value=st.session_state.ig_username or "")
     password = st.text_input("Instagram Password", type="password", value=st.session_state.ig_password or "")
 
@@ -494,11 +530,9 @@ def render_instagram_scheduler_page():
         else:
             success = login_to_instagram(username, password)
             if success:
-                # Store them in session_state for reuse
                 st.session_state.ig_username = username
                 st.session_state.ig_password = password
                 st.session_state.instagram_client = client
-
                 st.success("Logged into Instagram and session saved!")
                 logger.info(f"User {username} logged into Instagram; session saved.")
             else:
@@ -585,13 +619,22 @@ def render_instagram_scheduler_page():
     if scheduled_posts:
         for post in scheduled_posts:
             with st.expander(f"Post ID: {post['id']}"):
-                col1, col2 = st.columns([1, 2])
+                col1, col2, col3 = st.columns([1, 1, 2])  # ### NEW/CHANGED: 3 columns for buttons
                 with col1:
                     if post['image_path'] and os.path.exists(post['image_path']):
                         st.image(post['image_path'], use_container_width=True)
                     else:
                         st.warning("Image not available.")
                 with col2:
+                    # ### NEW/CHANGED CODE ###
+                    # Add a "Send Now" button for immediate posting
+                    if st.button(f"Send Now {post['id']}", key=f"send_now_{post['id']}"):
+                        send_post_now(st.session_state.user_email, post)
+
+                    # "Delete" button
+                    if st.button(f"Delete {post['id']}", key=f"delete_{post['id']}"):
+                        delete_scheduled_post(email=st.session_state.user_email, post_id=post['id'])
+                with col3:
                     st.markdown(f"**Caption:** {post['caption']}")
                     st_time = datetime.fromisoformat(post['scheduled_time'])
                     st.markdown(f"**Scheduled Time:** {st_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -600,13 +643,9 @@ def render_instagram_scheduler_page():
                     else:
                         st.markdown("**Article URL:** Not available")
 
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
-                            edit_scheduled_post(email=st.session_state.user_email, post=post)
-                    with col_b:
-                        if st.button(f"Delete {post['id']}", key=f"delete_{post['id']}"):
-                            delete_scheduled_post(email=st.session_state.user_email, post_id=post['id'])
+                    if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
+                        edit_scheduled_post(email=st.session_state.user_email, post=post)
+
     else:
         st.info("No scheduled posts found.")
 
