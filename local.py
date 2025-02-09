@@ -5,9 +5,9 @@ Features:
   • Local user registration and login (using JSON files)
   • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
   • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow)
-  • Instagram posting via instagrapi (with session saving to avoid repeated 2FA)
+  • Instagram posting via instagrapi (with a global client to avoid token issues)
   • Twitter posting via tweepy
-  • Post scheduling via APScheduler
+  • Post scheduling via APScheduler (jobs run in background threads)
   • A dashboard and separate pages for RSS feeds, Instagram scheduling, and account upgrade
   • Stripe Checkout integration for monetization with two pricing tiers:
          - Premium: $9.99/month
@@ -40,9 +40,9 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-# Simulation flags (adjust as needed)
+# Simulation flags
 TEST_MODE = False            # When True, simulate external calls.
-ALLOW_TEST_CARD = True       # When True (even if TEST_MODE is False), simulate Stripe Checkout
+ALLOW_TEST_CARD = True       # When True (even if TEST_MODE is False), simulate Stripe Checkout.
 
 # Pricing tiers
 PRICING_TIERS = {
@@ -63,6 +63,10 @@ TWITTER_ACCESS_SECRET = "your_twitter_access_secret"
 USERS_FILE = "users.json"
 USER_METRICS_FILE = "user_metrics.json"
 
+# ----------------------------- Global Instagram Client -----------------------------
+# We use a global variable to hold the Instagram client for background jobs.
+global_instagram_client = None
+
 # ----------------------------- Session State Initialization -----------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -72,8 +76,6 @@ if "user_role" not in st.session_state:
     st.session_state.user_role = None
 if "rss_headlines" not in st.session_state:
     st.session_state.rss_headlines = []
-if "instagram_client" not in st.session_state:
-    st.session_state.instagram_client = None
 if "scheduled_posts" not in st.session_state:
     st.session_state.scheduled_posts = []
 
@@ -312,11 +314,11 @@ def post_to_twitter(caption):
         raise
 
 def post_to_instagram(caption, image_path):
+    global global_instagram_client
+    if not global_instagram_client:
+        raise Exception("Global Instagram client not found. Please login again.")
     try:
-        client = st.session_state.instagram_client
-        if not client:
-            raise Exception("Instagram client not found. Please login again.")
-        client.photo_upload(image_path, caption)
+        global_instagram_client.photo_upload(image_path, caption)
         logger.info(f"Instagram post uploaded: {caption} with image {image_path}")
     except Exception as e:
         logger.error(f"Error posting to Instagram: {e}")
@@ -328,18 +330,17 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         logger.info(f"Simulated upload for post {post_id} for user {email}.")
         return
     try:
-        client = st.session_state.instagram_client
-        if not client:
+        global global_instagram_client
+        if not global_instagram_client:
             st.error("Instagram client not found. Please login again.")
             return
         try:
-            # Attempt to post with current token.
-            client.photo_upload(image_path, caption)
+            global_instagram_client.photo_upload(image_path, caption)
         except Exception as e:
             logger.error(f"Initial Instagram post failed for {post_id}: {e}")
-            # Try to refresh token
-            client.relogin()
-            client.photo_upload(image_path, caption)
+            # Attempt to refresh token and retry
+            global_instagram_client.relogin()
+            global_instagram_client.photo_upload(image_path, caption)
         logger.info(f"Scheduled Instagram post {post_id} uploaded.")
         update_user_metric(email, "instagram_posts_scheduled", 1)
         remove_scheduled_post(email, post_id)
@@ -438,6 +439,9 @@ def render_instagram_scheduler_page():
                 client = Client()
                 client.login(insta_username, insta_password)
                 st.session_state.instagram_client = client
+                # Set the global client variable for background jobs
+                global global_instagram_client
+                global_instagram_client = client
                 if not os.path.exists("sessions"):
                     os.makedirs("sessions")
                 session_file = f"sessions/{insta_username}.json"
@@ -479,7 +483,7 @@ def render_instagram_scheduler_page():
                 caption = st.text_area(f"Post Caption for '{title}'", headline['title'], key=f"caption_{title}")
                 submitted = st.form_submit_button(f"Schedule '{title}'")
                 if submitted:
-                    if not st.session_state.instagram_client:
+                    if not global_instagram_client:
                         st.error("Please login to Instagram first.")
                         logger.warning("Attempted scheduling without Instagram login.")
                     else:
@@ -668,7 +672,7 @@ def render_rss_feeds_page():
             if post.get('image_path') and os.path.exists(post['image_path']):
                 st.image(post['image_path'], caption=post['title'], use_container_width=True)
                 if st.button(f"Schedule Post {idx}", key=f"schedule_{idx}"):
-                    if "instagram_client" not in st.session_state or not st.session_state.instagram_client:
+                    if "instagram_client" not in st.session_state or not global_instagram_client:
                         st.error("Please login to Instagram first.")
                         logger.warning("Attempted scheduling without Instagram login.")
                     else:
