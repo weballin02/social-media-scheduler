@@ -764,22 +764,34 @@ def render_dashboard(metrics, thresholds):
 def render_rss_feeds_page():
     st.header("📰 RSS Feeds")
     st.subheader("Explore the Latest News and Create Instagram Posts")
-
+    
+    # Replace or expand your existing feed dictionary with these popular RSS feeds:
     rss_feeds = {
-        "BBC News": "http://feeds.bbci.co.uk/news/rss.xml",
-        "CNN": "http://rss.cnn.com/rss/cnn_topstories.rss",
-        "Reuters": "http://feeds.reuters.com/reuters/topNews",
+        "BBC News (World)": "http://feeds.bbci.co.uk/news/world/rss.xml",
+        "CNN Top Stories": "http://rss.cnn.com/rss/cnn_topstories.rss",
+        "Reuters Top News": "http://feeds.reuters.com/reuters/topNews",
+        "NYT: Home Page": "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
+        "The Guardian (UK)": "https://www.theguardian.com/uk/rss",
+        "ESPN Top Headlines": "https://www.espn.com/espn/rss/news",
+        "TechCrunch": "http://feeds.feedburner.com/TechCrunch/",
+        "The Verge": "https://www.theverge.com/rss/index.xml",
+        "MarketWatch": "http://feeds.marketwatch.com/marketwatch/topstories/"
     }
+    
     feed_name = st.selectbox("Choose a Feed", list(rss_feeds.keys()))
     rss_url = rss_feeds[feed_name]
+    
+    # Allow users to override with a custom feed if they wish:
     custom_rss_url = st.text_input("Custom RSS Feed URL (optional)", "")
     if custom_rss_url:
         rss_url = custom_rss_url
-
+    
     num_headlines = st.slider("Number of Headlines", 1, 10, 5)
+    
     if st.button("Fetch Headlines"):
         st.subheader(f"Top {num_headlines} Headlines from {feed_name}")
         st.session_state.rss_headlines = []
+        
         headlines = fetch_headlines(rss_url, limit=num_headlines)
         if headlines:
             progress_bar = st.progress(0)
@@ -792,31 +804,16 @@ def render_rss_feeds_page():
                     st.session_state.rss_headlines.append(entry)
                 else:
                     st.warning("No image available for this headline.")
-
+                
+                # Update usage metric and progress
                 update_user_metric(st.session_state.user_email, "rss_headlines_fetched", 1)
                 progress_bar.progress((idx + 1) / total_headlines)
                 time.sleep(0.5)
+            
             progress_bar.empty()
             st.success("RSS headlines fetched successfully!")
         else:
             st.warning("No headlines found. Try another feed.")
-
-    if st.session_state.rss_headlines:
-        st.markdown("## 📸 Generated Instagram Posts from Headlines")
-        for idx, post in enumerate(st.session_state.rss_headlines, 1):
-            st.markdown(f"### Post {idx}")
-            if post.get('image_path') and os.path.exists(post['image_path']):
-                st.image(post['image_path'], caption=post['title'], use_container_width=True)
-                if st.button(f"Schedule Post {idx}", key=f"schedule_{idx}"):
-                    if not st.session_state.instagram_client:
-                        st.error("Please login to Instagram first.")
-                        logger.warning("Attempted scheduling without Instagram login.")
-                    else:
-                        st.success("Please use the 'Instagram Scheduler' page to schedule this post.")
-                        logger.info(f"User chose to schedule post {idx} via Instagram Scheduler.")
-            else:
-                st.warning("Image not available for this headline.")
-
 # ----------------------------- Upgrade Page -----------------------------
 def render_upgrade_page():
     st.header("💰 Upgrade Your Account")
