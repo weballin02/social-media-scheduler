@@ -25,7 +25,7 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-TEST_MODE = True  # Toggle to True to simulate external calls (no real payment or posting)
+TEST_MODE = False  # Toggle to True to simulate external calls (no real payment or posting)
 
 PRICING_TIERS = {
     "Premium": 9.99,
