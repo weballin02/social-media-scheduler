@@ -25,7 +25,7 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-TEST_MODE = True  # Toggle to True to simulate external calls (no real payment or posting)
+TEST_MODE = False  # Toggle to True to simulate external calls (no real payment or posting)
 
 PRICING_TIERS = {
     "Premium": 9.99,
@@ -122,7 +122,7 @@ def login_user_local(email, password):
 
     # ### CHANGED/NEW CODE ###
     # Force a rerun so the UI moves the user to the main dashboard automatically.
-    st.experimental_rerun()
+    st.rerun()
 
     return True
 
