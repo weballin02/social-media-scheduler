@@ -1,11 +1,11 @@
 """
-Local Social Media Content Generator with Monetization and Test-Card Payment Simulation
+Local Social Media Content Generator with Updated Instagram Posting Logic
 
 Features:
   • Local user registration and login (using JSON files)
   • Local storage of user metrics (RSS headlines fetched, Instagram posts scheduled, scheduled posts)
   • RSS feed functionality with image downloading (using feedparser, BeautifulSoup, requests, and Pillow)
-  • Instagram posting via instagrapi (with a global client to avoid token issues and automatic relogin)
+  • Instagram posting via instagrapi (using a global client and automatic relogin on failure)
   • Twitter posting via tweepy
   • Post scheduling via APScheduler (jobs run in background threads)
   • A dashboard and separate pages for RSS feeds, Instagram scheduling, and account upgrade
@@ -16,7 +16,7 @@ Features:
   • ALLOW_TEST_CARD flag: When True (even in production), Stripe Checkout is simulated.
   • Uses st.query_params (the new API) for reading URL parameters.
   
-Before deployment, replace placeholder API keys/credentials and URLs with your actual production values.
+Before deployment, replace all placeholder API keys/credentials and URLs with your actual values.
 """
 
 import os
@@ -40,31 +40,26 @@ import pytz
 import stripe
 
 # ----------------------------- Global Configuration -----------------------------
-# Simulation flags
 TEST_MODE = False            # When True, simulate external calls.
-ALLOW_TEST_CARD = True       # When True (even if TEST_MODE is False), simulate Stripe Checkout.
+ALLOW_TEST_CARD = True       # When True (even in production), simulate Stripe Checkout.
 
-# Pricing tiers
 PRICING_TIERS = {
     "Premium": 9.99,
     "Pro": 19.99
 }
 
-# Replace with your actual API keys
+# Replace with your actual keys
 stripe.api_key = "your_live_stripe_secret_key"
-
-# Twitter API credentials (replace with your actual credentials)
 TWITTER_API_KEY = "your_twitter_api_key"
 TWITTER_API_SECRET = "your_twitter_api_secret"
 TWITTER_ACCESS_TOKEN = "your_twitter_access_token"
 TWITTER_ACCESS_SECRET = "your_twitter_access_secret"
 
-# Local storage file paths
 USERS_FILE = "users.json"
 USER_METRICS_FILE = "user_metrics.json"
 
 # ----------------------------- Global Instagram Client -----------------------------
-# We use a global variable to hold the Instagram client for background jobs.
+# This global variable will hold the logged-in Instagram client.
 global_instagram_client = None
 
 # ----------------------------- Session State Initialization -----------------------------
@@ -90,7 +85,6 @@ logger = logging.getLogger(__name__)
 
 # ----------------------------- Helper Functions -----------------------------
 def rerun_app():
-    """Force the app to rerun."""
     if hasattr(st, "rerun"):
         st.rerun()
     elif hasattr(st, "experimental_rerun"):
@@ -328,11 +322,12 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
         st.info("Simulated Instagram post upload.")
         logger.info(f"Simulated upload for post {post_id} for user {email}.")
         return
+    global global_instagram_client
+    if not global_instagram_client:
+        st.error("Instagram client not found. Please login again.")
+        return
     try:
-        global global_instagram_client
-        if not global_instagram_client:
-            st.error("Instagram client not found. Please login again.")
-            return
+        # Attempt to post. If it fails (e.g. token expired), relogin and retry.
         try:
             global_instagram_client.photo_upload(image_path, caption)
         except Exception as e:
@@ -599,7 +594,6 @@ def delete_scheduled_post(email, post_id):
     logger.info(f"Post {post_id} deleted for user {email}.")
 
 def send_post_now(email, post_id):
-    """Immediately send the scheduled post identified by post_id."""
     metrics = get_user_metrics(email)
     scheduled_posts = metrics.get("scheduled_posts", [])
     post = next((p for p in scheduled_posts if p['id'] == post_id), None)
