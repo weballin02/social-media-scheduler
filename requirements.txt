@@ -8,3 +8,6 @@ APScheduler
 pytz
 requests
 stripe
+sqlalchemy
+python-dotenv
+passlib
