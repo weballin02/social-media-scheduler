@@ -1,6 +1,6 @@
 """
 Local Social Media Content Generator with Monetization
-(Production-Ready Version with Updated Authentication UI)
+(Production-Ready Version with Enhanced Visual Design and Updated Authentication UI)
 """
 
 import os
@@ -91,7 +91,53 @@ def init_db():
 from passlib.hash import bcrypt
 
 # ----------------------------- Streamlit Configuration -----------------------------
-st.set_page_config(page_title="Social Media Content Generator", layout="wide")
+st.set_page_config(page_title="🚀 Social Media Content Generator", layout="wide")
+
+# ----------------------------- Custom CSS for Enhanced Visual Appeal -----------------------------
+st.markdown(
+    """
+    <style>
+    /* Global background for the main container */
+    .reportview-container {
+        background: #f8f9fa;
+    }
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background: #343a40;
+    }
+    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] label {
+        color: #ffffff;
+    }
+    /* Button styling */
+    .stButton button {
+        background-color: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 0.5em 1em;
+        font-size: 16px;
+    }
+    .stButton button:hover {
+        background-color: #0056b3;
+    }
+    /* Text input styling */
+    .stTextInput>div>input {
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        padding: 0.5em;
+    }
+    /* Metric card styling */
+    .metric-card {
+        text-align: center;
+        border: 1px solid #e6e6e6;
+        padding: 15px;
+        border-radius: 10px;
+        background: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ----------------------------- Session State Initialization -----------------------------
 if "logged_in" not in st.session_state:
@@ -669,8 +715,8 @@ def render_dashboard(metrics, thresholds):
         with column:
             st.markdown(
                 f"""
-                <div style="text-align: center; border: 1px solid #e6e6e6; padding: 15px; border-radius: 10px;">
-                    <img src="{icon_url}" alt="{label}" style="width: 50px; height: 50px; margin-bottom: 10px;" />
+                <div class="metric-card">
+                    <img src="{icon_url}" alt="{label}" style="width:50px; height:50px; margin-bottom:10px;" />
                     <h3 style="margin: 5px 0;">{label}</h3>
                     <p style="margin: 5px 0; font-size: 18px;">{current} / {total}</p>
                     <div style="height: 20px; background-color: #f3f3f3; border-radius: 10px;">
