@@ -2,7 +2,11 @@
 import io
 import pytest
 from PIL import Image
+from local import Base, register_user_local, login_user_local
 from local import download_image
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 class DummyResponse:
     def __init__(self, content, status_code=200):
