@@ -1,6 +1,7 @@
 """
 Local Social Media Content Generator with Monetization
-(Updated to use st.query_params and single-click login)
+(Updated to use st.query_params, single-click login,
+and production-ready database & security enhancements)
 """
 
 import os
@@ -24,23 +25,22 @@ from apscheduler.jobstores.base import JobLookupError
 import pytz
 import stripe
 
-# ----------------------------- Global Configuration -----------------------------
-TEST_MODE = False  # Toggle to True to simulate external calls (no real payment or posting)
+# ----------------------------- Load Environment Variables -----------------------------
+from dotenv import load_dotenv
 
+load_dotenv()  # Loads configuration from a .env file if available
+
+# ----------------------------- Global Configuration -----------------------------
+TEST_MODE = os.getenv("TEST_MODE", "False").lower() in ("true", "1", "t")
 PRICING_TIERS = {
     "Premium": 9.99,
     "Pro": 19.99
 }
 
-stripe.api_key = "your_stripe_secret_key"
-
-USERS_FILE = "users.json"
-USER_METRICS_FILE = "user_metrics.json"
-RSS_FEEDS_FILE = "user_rss_feeds.json"
-POSTS_FILE = "scheduled_posts.json"
-
-# Create a global instagrapi Client
-client = Client()
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+if not STRIPE_SECRET_KEY:
+    logging.error("STRIPE_SECRET_KEY is not set in the environment variables.")
+stripe.api_key = STRIPE_SECRET_KEY
 
 # ----------------------------- Logging Configuration -----------------------------
 logging.basicConfig(
@@ -50,6 +50,63 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# ----------------------------- Database Setup -----------------------------
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, ForeignKey
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.exc import SQLAlchemyError
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///app.db")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class User(Base):
+    """
+    User model for storing user credentials and role.
+    """
+    __tablename__ = "users"
+    email = Column(String, primary_key=True, index=True)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, default="free")
+    metrics = relationship("UserMetric", back_populates="user", uselist=False)
+    posts = relationship("ScheduledPost", back_populates="user")
+
+
+class UserMetric(Base):
+    """
+    Model for storing user metrics.
+    """
+    __tablename__ = "user_metrics"
+    email = Column(String, ForeignKey("users.email"), primary_key=True)
+    rss_headlines_fetched = Column(Integer, default=0)
+    instagram_posts_scheduled = Column(Integer, default=0)
+    user = relationship("User", back_populates="metrics")
+
+
+class ScheduledPost(Base):
+    """
+    Model for storing scheduled posts.
+    """
+    __tablename__ = "scheduled_posts"
+    id = Column(String, primary_key=True, index=True)
+    email = Column(String, ForeignKey("users.email"))
+    image_path = Column(String)
+    caption = Column(Text)
+    scheduled_time = Column(DateTime)
+    timezone = Column(String)
+    article_url = Column(String)
+    user = relationship("User", back_populates="posts")
+
+
+def init_db():
+    """Initializes the database (creates tables if not exist)."""
+    Base.metadata.create_all(engine)
+
+
+# ----------------------------- Password Hashing -----------------------------
+from passlib.hash import bcrypt
 
 # ----------------------------- Streamlit Configuration -----------------------------
 st.set_page_config(page_title="Social Media Content Generator", layout="wide")
@@ -65,154 +122,236 @@ if "rss_headlines" not in st.session_state:
     st.session_state.rss_headlines = []
 if "instagram_client" not in st.session_state:
     st.session_state.instagram_client = None
-
-# We'll store IG credentials in session_state
 if "ig_username" not in st.session_state:
     st.session_state.ig_username = None
 if "ig_password" not in st.session_state:
     st.session_state.ig_password = None
 
-# ----------------------------- Local User Management -----------------------------
-def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            st.error(f"Error loading users: {e}")
-            return {}
-    return {}
+# ----------------------------- APScheduler Initialization -----------------------------
+@st.cache_resource(show_spinner=False)
+def init_scheduler():
+    scheduler_ = BackgroundScheduler()
+    scheduler_.start()
+    logger.info("APScheduler started.")
+    return scheduler_
 
-def save_users(users):
-    try:
-        with open(USERS_FILE, "w") as f:
-            json.dump(users, f, indent=4)
-    except Exception as e:
-        st.error(f"Error saving users: {e}")
+scheduler = init_scheduler()
+atexit.register(lambda: scheduler.shutdown())
 
+# ----------------------------- Database-Based User Management -----------------------------
 def register_user_local(email, password):
-    users = load_users()
-    if email in users:
-        st.error("User already exists. Please log in.")
-        return False
-    users[email] = {"password": password, "role": "free"}
-    save_users(users)
-    initialize_user_metrics(email)
-    st.success("Registration successful! Please log in.")
-    logger.info(f"User registered: {email}")
-    return True
+    """
+    Registers a new user by hashing the password and storing in the database.
+    Also initializes user metrics.
+    """
+    with SessionLocal() as db:
+        existing_user = db.query(User).filter(User.email == email).first()
+        if existing_user:
+            st.error("User already exists. Please log in.")
+            return False
+        password_hash = bcrypt.hash(password)
+        user = User(email=email, password_hash=password_hash, role="free")
+        db.add(user)
+        # Create initial metrics record
+        metrics = UserMetric(email=email, rss_headlines_fetched=0, instagram_posts_scheduled=0)
+        db.add(metrics)
+        try:
+            db.commit()
+            st.success("Registration successful! Please log in.")
+            logger.info(f"User registered: {email}")
+            return True
+        except SQLAlchemyError as e:
+            db.rollback()
+            st.error(f"Database error during registration: {e}")
+            logger.error(f"Database error during registration for {email}: {e}")
+            return False
+
 
 def login_user_local(email, password):
-    users = load_users()
-    if email not in users:
-        st.error("User not found. Please register.")
-        return False
-    if users[email]["password"] != password:
-        st.error("Incorrect password.")
-        return False
+    """
+    Logs in a user by verifying credentials from the database.
+    """
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            st.error("User not found. Please register.")
+            return False
+        if not bcrypt.verify(password, user.password_hash):
+            st.error("Incorrect password.")
+            return False
 
-    st.session_state.user_email = email
-    st.session_state.user_role = users[email].get("role", "free")
-    st.session_state.logged_in = True
-    initialize_user_metrics(email)
-    st.success(f"Logged in as {st.session_state.user_role} user!")
-    logger.info(f"User logged in: {email}")
+        st.session_state.user_email = email
+        st.session_state.user_role = user.role
+        st.session_state.logged_in = True
+        st.success(f"Logged in as {user.role} user!")
+        logger.info(f"User logged in: {email}")
 
-    load_and_schedule_existing_posts(email)
+        load_and_schedule_existing_posts(email)
+        st.rerun()
+        return True
 
-    # ### CHANGED/NEW CODE ###
-    # Force a rerun so the UI moves the user to the main dashboard automatically.
-    st.rerun()
-
-    return True
 
 def upgrade_user_plan(username, plan):
-    users = load_users()
-    if username in users:
-        users[username]["role"] = plan
-        save_users(users)
-        st.session_state.user_role = plan
-        logger.info(f"User {username} upgraded to {plan}")
-    else:
-        st.error("User not found during upgrade.")
+    """
+    Upgrades a user's account to the selected plan.
+    """
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.email == username).first()
+        if user:
+            user.role = plan
+            try:
+                db.commit()
+                st.session_state.user_role = plan
+                logger.info(f"User {username} upgraded to {plan}")
+            except SQLAlchemyError as e:
+                db.rollback()
+                st.error("Database error during upgrade.")
+                logger.error(f"Database error during upgrade for {username}: {e}")
+        else:
+            st.error("User not found during upgrade.")
 
-# ----------------------------- Local User Metrics Management -----------------------------
-def load_user_metrics():
-    if os.path.exists(USER_METRICS_FILE):
+
+# ----------------------------- Database-Based Metrics & Scheduled Posts -----------------------------
+def update_user_metric(email, metric, value):
+    """
+    Updates a user metric (e.g., rss_headlines_fetched, instagram_posts_scheduled) in the database.
+    """
+    with SessionLocal() as db:
+        user_metric = db.query(UserMetric).filter(UserMetric.email == email).first()
+        if not user_metric:
+            user_metric = UserMetric(email=email, rss_headlines_fetched=0, instagram_posts_scheduled=0)
+            db.add(user_metric)
+        if hasattr(user_metric, metric):
+            setattr(user_metric, metric, getattr(user_metric, metric, 0) + value)
+        else:
+            st.error("Invalid metric specified.")
+            return
         try:
-            with open(USER_METRICS_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            st.error(f"Error loading user metrics: {e}")
-            return {}
-    return {}
+            db.commit()
+            logger.info(f"Updated {metric} by {value} for user {email}.")
+        except SQLAlchemyError as e:
+            db.rollback()
+            st.error("Database error during metric update.")
+            logger.error(f"Database error during metric update for {email}: {e}")
 
-def save_user_metrics(metrics):
-    try:
-        with open(USER_METRICS_FILE, "w") as f:
-            json.dump(metrics, f, indent=4)
-    except Exception as e:
-        st.error(f"Error saving user metrics: {e}")
-
-def initialize_user_metrics(email):
-    metrics = load_user_metrics()
-    if email not in metrics:
-        metrics[email] = {
-            "rss_headlines_fetched": 0,
-            "instagram_posts_scheduled": 0,
-            "scheduled_posts": []
-        }
-        save_user_metrics(metrics)
-        logger.info(f"Initialized metrics for user: {email}")
 
 def get_user_metrics(email):
-    metrics = load_user_metrics()
-    return metrics.get(email, {"rss_headlines_fetched": 0, "instagram_posts_scheduled": 0, "scheduled_posts": []})
+    """
+    Retrieves user metrics from the database.
+    """
+    with SessionLocal() as db:
+        user_metric = db.query(UserMetric).filter(UserMetric.email == email).first()
+        if user_metric:
+            return {
+                "rss_headlines_fetched": user_metric.rss_headlines_fetched,
+                "instagram_posts_scheduled": user_metric.instagram_posts_scheduled,
+            }
+        return {"rss_headlines_fetched": 0, "instagram_posts_scheduled": 0}
 
-def update_user_metric(email, metric, value):
-    metrics = load_user_metrics()
-    if email not in metrics:
-        initialize_user_metrics(email)
-        metrics = load_user_metrics()
-    metrics[email][metric] = metrics[email].get(metric, 0) + value
-    save_user_metrics(metrics)
-    logger.info(f"Updated {metric} by {value} for user {email}.")
 
 def add_scheduled_post(email, post_data):
-    metrics = load_user_metrics()
-    if email not in metrics:
-        initialize_user_metrics(email)
-        metrics = load_user_metrics()
-    scheduled_posts = metrics[email].get("scheduled_posts", [])
-    scheduled_posts.append(post_data)
-    metrics[email]["scheduled_posts"] = scheduled_posts
-    save_user_metrics(metrics)
-    logger.info(f"Added scheduled post for user {email}: {post_data}")
+    """
+    Adds a scheduled post record for the user in the database.
+    """
+    with SessionLocal() as db:
+        post = ScheduledPost(
+            id=post_data["id"],
+            email=email,
+            image_path=post_data["image_path"],
+            caption=post_data["caption"],
+            scheduled_time=datetime.fromisoformat(post_data["scheduled_time"]),
+            timezone=post_data["timezone"],
+            article_url=post_data.get("article_url", "")
+        )
+        db.add(post)
+        try:
+            db.commit()
+            logger.info(f"Added scheduled post for user {email}: {post_data}")
+        except SQLAlchemyError as e:
+            db.rollback()
+            st.error("Database error during adding scheduled post.")
+            logger.error(f"Database error during adding scheduled post for {email}: {e}")
+
 
 def remove_scheduled_post(email, post_id):
-    metrics = load_user_metrics()
-    if email in metrics:
-        scheduled_posts = metrics[email].get("scheduled_posts", [])
-        updated_posts = [post for post in scheduled_posts if post['id'] != post_id]
-        metrics[email]["scheduled_posts"] = updated_posts
-        save_user_metrics(metrics)
-        logger.info(f"Removed scheduled post {post_id} for user {email}.")
+    """
+    Removes a scheduled post record from the database.
+    """
+    with SessionLocal() as db:
+        post = db.query(ScheduledPost).filter(
+            ScheduledPost.id == post_id, ScheduledPost.email == email
+        ).first()
+        if post:
+            db.delete(post)
+            try:
+                db.commit()
+                logger.info(f"Removed scheduled post {post_id} for user {email}.")
+            except SQLAlchemyError as e:
+                db.rollback()
+                st.error("Database error during removing scheduled post.")
+                logger.error(f"Database error during removing scheduled post for {email}: {e}")
+
 
 def update_scheduled_post(email, post_id, updated_data):
-    metrics = load_user_metrics()
-    if email in metrics:
-        scheduled_posts = metrics[email].get("scheduled_posts", [])
-        for idx, post in enumerate(scheduled_posts):
-            if post['id'] == post_id:
-                scheduled_posts[idx].update(updated_data)
-                break
-        metrics[email]["scheduled_posts"] = scheduled_posts
-        save_user_metrics(metrics)
-        logger.info(f"Updated scheduled post {post_id} for user {email}: {updated_data}")
+    """
+    Updates an existing scheduled post record in the database.
+    """
+    with SessionLocal() as db:
+        post = db.query(ScheduledPost).filter(
+            ScheduledPost.id == post_id, ScheduledPost.email == email
+        ).first()
+        if post:
+            if "caption" in updated_data:
+                post.caption = updated_data["caption"]
+            if "scheduled_time" in updated_data:
+                post.scheduled_time = datetime.fromisoformat(updated_data["scheduled_time"])
+            if "timezone" in updated_data:
+                post.timezone = updated_data["timezone"]
+            try:
+                db.commit()
+                logger.info(f"Updated scheduled post {post_id} for user {email}: {updated_data}")
+            except SQLAlchemyError as e:
+                db.rollback()
+                st.error("Database error during updating scheduled post.")
+                logger.error(f"Database error during updating scheduled post for {email}: {e}")
+
+
+def load_and_schedule_existing_posts(email):
+    """
+    Loads scheduled posts from the database and schedules them using APScheduler.
+    """
+    with SessionLocal() as db:
+        scheduled_posts = db.query(ScheduledPost).filter(ScheduledPost.email == email).all()
+    for post in scheduled_posts:
+        post_id = post.id
+        image_path = post.image_path
+        caption = post.caption
+        scheduled_time = post.scheduled_time
+        timezone_str = post.timezone
+        try:
+            timezone = pytz.timezone(timezone_str)
+            # If scheduled_time is naive, localize it.
+            if scheduled_time.tzinfo is None:
+                scheduled_time = timezone.localize(scheduled_time)
+        except Exception as e:
+            logger.error(f"Timezone error for post {post_id}: {e}")
+            continue
+
+        if not scheduler.get_job(post_id):
+            now_in_zone = datetime.now(pytz.timezone(timezone_str))
+            if scheduled_time > now_in_zone:
+                add_job(email, post_id, image_path, caption, scheduled_time)
+                logger.info(f"Loaded and scheduled post {post_id} for {email}")
+            else:
+                logger.info(f"Post {post_id} time has passed. Uploading immediately.")
+                schedule_instagram_post(email, post_id, image_path, caption, now_in_zone)
+
 
 # ----------------------------- Stripe Payment Integration -----------------------------
 def create_stripe_checkout_session(username, plan):
-    """Create a Stripe Checkout session for the selected plan."""
+    """
+    Create a Stripe Checkout session for the selected plan.
+    """
     if TEST_MODE:
         logger.info("Simulated Stripe session created.")
         class DummySession:
@@ -239,11 +378,11 @@ def create_stripe_checkout_session(username, plan):
         return session
     except Exception as e:
         st.error(f"Error creating Stripe session: {e}")
+        logger.error(f"Stripe session creation error: {e}")
         return None
 
-# ### CHANGED/NEW CODE ###
-# Use st.query_params instead of st.experimental_get_query_params
-# Payment verification on app load
+
+# Payment verification on app load using st.query_params
 query_params = st.query_params
 if "session_id" in query_params and "username" in query_params and "plan" in query_params:
     session_id = query_params["session_id"]
@@ -252,7 +391,6 @@ if "session_id" in query_params and "username" in query_params and "plan" in que
     if TEST_MODE:
         upgrade_user_plan(username_param, plan_param)
         st.success(f"Simulated upgrade: You are now a {plan_param} user.")
-        # Clear query params
         st.query_params.clear()
     else:
         try:
@@ -263,23 +401,16 @@ if "session_id" in query_params and "username" in query_params and "plan" in que
                 st.query_params.clear()
         except Exception as e:
             st.error(f"Error verifying payment: {e}")
+            logger.error(f"Error verifying payment: {e}")
 
-# ----------------------------- APScheduler Initialization -----------------------------
-@st.cache_resource(show_spinner=False)
-def init_scheduler():
-    scheduler_ = BackgroundScheduler()
-    scheduler_.start()
-    logger.info("APScheduler started.")
-    return scheduler_
-
-scheduler = init_scheduler()
-atexit.register(lambda: scheduler.shutdown())
 
 # ----------------------------- Instagram Logic -----------------------------
+client = Client()  # Global instagrapi client
+
+
 def login_to_instagram(username, password):
     """
-    Saves a local JSON session file named after `username`.
-    Will load & reuse that session on subsequent logins.
+    Logs into Instagram and saves a session file for reuse.
     """
     global client
     session_dir = "sessions"
@@ -301,7 +432,11 @@ def login_to_instagram(username, password):
         logger.error(f"Instagram login failed for {username}: {e}")
         return False
 
+
 def post_to_instagram(image_path, caption):
+    """
+    Posts an image with caption to Instagram.
+    """
     global client
     try:
         client.photo_upload(image_path, caption)
@@ -311,7 +446,11 @@ def post_to_instagram(image_path, caption):
         logger.error(f"Failed to post to Instagram: {e}")
         return False
 
+
 def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time):
+    """
+    Attempts to post a scheduled Instagram post.
+    """
     if TEST_MODE:
         st.info("Simulated Instagram post upload.")
         logger.info(f"Simulated upload for post {post_id} for user {email}.")
@@ -346,7 +485,11 @@ def schedule_instagram_post(email, post_id, image_path, caption, scheduled_time)
     except Exception as e:
         logger.error(f"Exception in schedule_instagram_post: {e}")
 
+
 def add_job(email, post_id, image_path, caption, scheduled_time):
+    """
+    Adds a job to APScheduler to post to Instagram at the scheduled time.
+    """
     try:
         scheduler.add_job(
             schedule_instagram_post,
@@ -361,29 +504,12 @@ def add_job(email, post_id, image_path, caption, scheduled_time):
         logger.error(f"Failed to schedule job {post_id}: {e}")
         st.error(f"Failed to schedule post: {e}")
 
-def load_and_schedule_existing_posts(email):
-    metrics = get_user_metrics(email)
-    scheduled_posts = metrics.get("scheduled_posts", [])
-    for post in scheduled_posts:
-        post_id = post['id']
-        image_path = post['image_path']
-        caption = post['caption']
-        scheduled_time = datetime.fromisoformat(post['scheduled_time'])
-        timezone = post['timezone']
-        scheduled_time = pytz.timezone(timezone).localize(scheduled_time)
-
-        if not scheduler.get_job(post_id):
-            now_in_zone = datetime.now(pytz.timezone(timezone))
-            if scheduled_time > now_in_zone:
-                add_job(email, post_id, image_path, caption, scheduled_time)
-                logger.info(f"Loaded and scheduled post {post_id} for {email}")
-            else:
-                logger.info(f"Post {post_id} time has passed. Uploading immediately.")
-                schedule_instagram_post(email, post_id, image_path, caption, now_in_zone)
 
 # ----------------------------- RSS Feed Functionality -----------------------------
 def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
-    """Fetch headlines and associated images from the RSS feed."""
+    """
+    Fetch headlines and associated images from the RSS feed.
+    """
     try:
         feed = feedparser.parse(rss_url)
         headlines = []
@@ -440,8 +566,11 @@ def fetch_headlines(rss_url, limit=5, image_dir="generated_posts"):
         st.error(f"Failed to fetch RSS feed: {e}")
         return []
 
+
 def download_image(image_url, image_dir="generated_posts"):
-    """Download an image from the given URL and save it locally."""
+    """
+    Downloads an image from the given URL and saves it locally.
+    """
     try:
         response = requests.get(image_url, timeout=10)
         response.raise_for_status()
@@ -460,8 +589,12 @@ def download_image(image_url, image_dir="generated_posts"):
         st.error(f"Failed to download image from {image_url}: {e}")
         return None
 
+
 # ----------------------------- Instagram Scheduler Functionality (Streamlit UI) -----------------------------
 def render_instagram_scheduler_page():
+    """
+    Renders the Instagram Scheduler page for planning and automating posts.
+    """
     st.header("📅 Instagram Scheduler")
     st.subheader("Plan and Automate Your Instagram Content")
 
@@ -491,13 +624,17 @@ def render_instagram_scheduler_page():
 
     if st.session_state.user_email:
         metrics = get_user_metrics(st.session_state.user_email)
-        scheduled_posts = metrics.get("scheduled_posts", [])
+        # Retrieve scheduled posts from the database
+        with SessionLocal() as db:
+            scheduled_posts = db.query(ScheduledPost).filter(
+                ScheduledPost.email == st.session_state.user_email
+            ).all()
     else:
         scheduled_posts = []
 
     fetched_headlines = st.session_state.rss_headlines
     scheduled_captions = [
-        post.get('caption', '').replace(f" Read more at: {post.get('article_url', '')}", '')
+        post.caption.replace(f" Read more at: {post.article_url}", '')
         for post in scheduled_posts
     ]
     unscheduled_headlines = [h for h in fetched_headlines if h['title'] not in scheduled_captions]
@@ -566,53 +703,57 @@ def render_instagram_scheduler_page():
     st.subheader("📋 Your Scheduled Posts")
     if scheduled_posts:
         for post in scheduled_posts:
-            with st.expander(f"Post ID: {post['id']}"):
+            with st.expander(f"Post ID: {post.id}"):
                 col1, col2 = st.columns([1, 2])
                 with col1:
-                    if post['image_path'] and os.path.exists(post['image_path']):
-                        st.image(post['image_path'], use_container_width=True)
+                    if post.image_path and os.path.exists(post.image_path):
+                        st.image(post.image_path, use_container_width=True)
                     else:
                         st.warning("Image not available.")
                 with col2:
-                    st.markdown(f"**Caption:** {post['caption']}")
-                    st_time = datetime.fromisoformat(post['scheduled_time'])
+                    st.markdown(f"**Caption:** {post.caption}")
+                    st_time = post.scheduled_time
                     st.markdown(f"**Scheduled Time:** {st_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                    if post.get('article_url'):
-                        st.markdown(f"**Article URL:** [Read more]({post['article_url']})")
+                    if post.article_url:
+                        st.markdown(f"**Article URL:** [Read more]({post.article_url})")
                     else:
                         st.markdown("**Article URL:** Not available")
 
                     col_a, col_b = st.columns(2)
                     with col_a:
-                        if st.button(f"Edit {post['id']}", key=f"edit_{post['id']}"):
+                        if st.button(f"Edit {post.id}", key=f"edit_{post.id}"):
                             edit_scheduled_post(email=st.session_state.user_email, post=post)
                     with col_b:
-                        if st.button(f"Delete {post['id']}", key=f"delete_{post['id']}"):
-                            delete_scheduled_post(email=st.session_state.user_email, post_id=post['id'])
+                        if st.button(f"Delete {post.id}", key=f"delete_{post.id}"):
+                            delete_scheduled_post(email=st.session_state.user_email, post_id=post.id)
     else:
         st.info("No scheduled posts found.")
 
+
 def edit_scheduled_post(email, post):
-    with st.form(f"edit_form_{post['id']}"):
-        st.header(f"Edit Scheduled Post {post['id']}")
-        original_caption = post['caption']
-        article_url = post.get('article_url', '')
+    """
+    Renders a form for editing an existing scheduled post.
+    """
+    with st.form(f"edit_form_{post.id}"):
+        st.header(f"Edit Scheduled Post {post.id}")
+        original_caption = post.caption
+        article_url = post.article_url if post.article_url else ''
         if article_url:
             original_caption = original_caption.replace(f"\nRead more at: {article_url}", '')
-        new_caption = st.text_area("Post Caption", original_caption, key=f"edit_caption_{post['id']}")
+        new_caption = st.text_area("Post Caption", original_caption, key=f"edit_caption_{post.id}")
 
-        scheduled_time_dt = datetime.fromisoformat(post['scheduled_time'])
-        timezone = post.get('timezone', 'UTC')
+        scheduled_time_dt = post.scheduled_time
+        timezone_str = post.timezone if post.timezone else 'UTC'
 
         col1, col2 = st.columns(2)
         with col1:
-            new_date = st.date_input("Select Date", scheduled_time_dt.date(), key=f"edit_date_{post['id']}")
+            new_date = st.date_input("Select Date", scheduled_time_dt.date(), key=f"edit_date_{post.id}")
         with col2:
-            new_time = st.time_input("Select Time", scheduled_time_dt.time(), key=f"edit_time_{post['id']}")
+            new_time = st.time_input("Select Time", scheduled_time_dt.time(), key=f"edit_time_{post.id}")
 
         new_timezone = st.selectbox("Select Timezone", pytz.all_timezones,
-                                    index=pytz.all_timezones.index(timezone),
-                                    key=f"edit_timezone_{post['id']}")
+                                    index=pytz.all_timezones.index(timezone_str),
+                                    key=f"edit_timezone_{post.id}")
         submitted = st.form_submit_button("Update Post")
         if submitted:
             try:
@@ -620,13 +761,13 @@ def edit_scheduled_post(email, post):
                 new_scheduled_datetime = pytz.timezone(new_timezone).localize(new_scheduled_datetime)
             except Exception as e:
                 st.error(f"Error in scheduling datetime: {e}")
-                logger.error(f"Error updating post '{post['id']}': {e}")
+                logger.error(f"Error updating post '{post.id}': {e}")
                 return
 
             now_in_zone = datetime.now(pytz.timezone(new_timezone))
             if new_scheduled_datetime <= now_in_zone:
                 st.error("Scheduled time must be in the future!")
-                logger.warning(f"User attempted to update post '{post['id']}' to a past time.")
+                logger.warning(f"User attempted to update post '{post.id}' to a past time.")
                 return
 
             updated_caption = f"{new_caption}\nRead more at: {article_url}" if article_url else new_caption
@@ -635,19 +776,23 @@ def edit_scheduled_post(email, post):
                 "scheduled_time": new_scheduled_datetime.isoformat(),
                 "timezone": new_timezone
             }
-            update_scheduled_post(email, post['id'], updated_data)
+            update_scheduled_post(email, post.id, updated_data)
 
             try:
-                scheduler.remove_job(post['id'])
-                logger.info(f"Removed job {post['id']} for rescheduling.")
+                scheduler.remove_job(post.id)
+                logger.info(f"Removed job {post.id} for rescheduling.")
             except JobLookupError:
-                logger.warning(f"Job {post['id']} not found for removal.")
+                logger.warning(f"Job {post.id} not found for removal.")
 
-            add_job(email, post['id'], post['image_path'], updated_caption, new_scheduled_datetime)
+            add_job(email, post.id, post.image_path, updated_caption, new_scheduled_datetime)
             st.success("Scheduled post updated successfully!")
-            logger.info(f"Post {post['id']} updated for user {email}.")
+            logger.info(f"Post {post.id} updated for user {email}.")
+
 
 def delete_scheduled_post(email, post_id):
+    """
+    Deletes a scheduled post both from the scheduler and the database.
+    """
     try:
         scheduler.remove_job(post_id)
         logger.info(f"Removed job {post_id} from scheduler.")
@@ -657,8 +802,12 @@ def delete_scheduled_post(email, post_id):
     st.success(f"Scheduled post {post_id} deleted successfully.")
     logger.info(f"Post {post_id} deleted for user {email}.")
 
+
 # ----------------------------- Dashboard Rendering -----------------------------
 def render_dashboard(metrics, thresholds):
+    """
+    Renders a dashboard showing user metrics and progress.
+    """
     st.header("📊 Dashboard")
     st.subheader("Your Activity Overview")
     col1, col2 = st.columns(2)
@@ -703,12 +852,15 @@ def render_dashboard(metrics, thresholds):
         if metrics.get("instagram_posts_scheduled", 0) >= thresholds.get("instagram_posts_scheduled", 5):
             st.warning("Upgrade to Premium to schedule more Instagram posts!")
 
+
 # ----------------------------- RSS Feeds Rendering -----------------------------
 def render_rss_feeds_page():
+    """
+    Renders the RSS feeds page to fetch headlines and generate Instagram posts.
+    """
     st.header("📰 RSS Feeds")
     st.subheader("Explore the Latest News and Create Instagram Posts")
 
-    # Updated list of high-demand RSS feeds:
     rss_feeds = {
         "BBC News (World)": "http://feeds.bbci.co.uk/news/world/rss.xml",
         "CNN Top Stories": "http://rss.cnn.com/rss/cnn_topstories.rss",
@@ -768,8 +920,12 @@ def render_rss_feeds_page():
             else:
                 st.warning("Image not available for this headline.")
 
+
 # ----------------------------- Upgrade Page -----------------------------
 def render_upgrade_page():
+    """
+    Renders the upgrade page with available plans and a Stripe checkout session.
+    """
     st.header("💰 Upgrade Your Account")
     st.markdown("Unlock unlimited RSS feeds and scheduling by upgrading your account.")
     st.markdown("- **Premium:** $9.99/month (Unlimited features)")
@@ -781,8 +937,12 @@ def render_upgrade_page():
         if session:
             st.markdown(f"Please [click here to pay]({session.url}) to complete your upgrade.")
 
+
 # ----------------------------- Main Menu Navigation -----------------------------
 def render_user_interface():
+    """
+    Renders the main user interface with sidebar navigation.
+    """
     menu = st.sidebar.radio("Navigation", ["Dashboard", "RSS Feeds", "Instagram Scheduler", "Upgrade"])
     thresholds = {"rss_headlines_fetched": 10, "instagram_posts_scheduled": 5}
 
@@ -796,8 +956,12 @@ def render_user_interface():
     elif menu == "Upgrade":
         render_upgrade_page()
 
+
 # ----------------------------- Authentication Functions -----------------------------
 def register_user():
+    """
+    Renders the registration form.
+    """
     st.header("Register")
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
@@ -816,7 +980,11 @@ def register_user():
         else:
             register_user_local(email, password)
 
+
 def login_user():
+    """
+    Renders the login form.
+    """
     st.header("Login")
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
@@ -828,8 +996,13 @@ def login_user():
         else:
             login_user_local(email, password)
 
+
 # ----------------------------- Main Application Logic -----------------------------
 def main():
+    """
+    Main function to initialize the database and render the appropriate pages.
+    """
+    init_db()  # Ensure database is initialized
     st.title("🚀 Social Media Content Generator")
     if not st.session_state.logged_in:
         st.sidebar.title("Authentication")
@@ -840,6 +1013,7 @@ def main():
             login_user()
     else:
         render_user_interface()
+
 
 if __name__ == "__main__":
     main()
