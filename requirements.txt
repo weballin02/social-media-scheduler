@@ -11,3 +11,4 @@ instagrapi
 stripe
 pytz
 pytest
+bcrypt
