@@ -284,7 +284,6 @@ def load_and_schedule_existing_posts(email):
 
 # ----------------------------- Stripe Payment Integration -----------------------------
 def create_stripe_checkout_session(username, plan):
-    # Use test flag from session state if available, otherwise default to global TEST_MODE.
     mode = st.session_state.get("TEST_MODE", TEST_MODE)
     if mode:
         logger.info("Simulated Stripe session created (test mode active).")
@@ -337,7 +336,7 @@ if "session_id" in query_params and "username" in query_params and "plan" in que
             logger.error(f"Error verifying payment: {e}")
 
 # ----------------------------- Instagram Logic -----------------------------
-client = Client()  # Global instagrapi client
+client = Client()
 
 def login_to_instagram(username, password):
     global client
@@ -786,7 +785,7 @@ def login_form():
         else:
             success = login_user_local(email, password)
             if success:
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Login failed. Please try again.")
 
@@ -807,7 +806,7 @@ def register_form():
             if success:
                 st.success("Registration successful! You can now log in.")
                 st.session_state.auth_mode = "login"
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Registration failed. Please try again.")
 
@@ -818,12 +817,12 @@ def auth_page():
         login_form()
         if st.button("Don't have an account? Register"):
             st.session_state.auth_mode = "register"
-            st.experimental_rerun()
+            st.rerun()
     elif st.session_state.auth_mode == "register":
         register_form()
         if st.button("Already have an account? Log in"):
             st.session_state.auth_mode = "login"
-            st.experimental_rerun()
+            st.rerun()
 
 # ----------------------------- Main Menu Navigation -----------------------------
 def render_user_interface():
