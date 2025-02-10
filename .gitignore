@@ -1,5 +1,5 @@
 # Ignore environment variables and logs
-.env
+.env.example
 app.log
 
 # Python cache files
