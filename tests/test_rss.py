@@ -2,7 +2,7 @@
 import io
 import pytest
 from PIL import Image
-from app import download_image
+from local import download_image
 
 class DummyResponse:
     def __init__(self, content, status_code=200):
