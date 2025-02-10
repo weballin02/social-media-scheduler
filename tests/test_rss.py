@@ -1,6 +1,6 @@
 import sys
 import os
-# Add the project root to sys.path
+# Add the project root to sys.path so that "local.py" can be found.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import io
@@ -25,7 +25,7 @@ def dummy_requests_get(url, timeout):
     return DummyResponse(buf.getvalue())
 
 def test_download_image(monkeypatch, tmp_path):
-    # Override requests.get in the local module with our dummy function.
+    # Override requests.get in the local module.
     monkeypatch.setattr("local.requests.get", dummy_requests_get)
     
     # Create a temporary directory for images.
