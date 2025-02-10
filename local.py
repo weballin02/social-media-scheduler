@@ -1,6 +1,6 @@
 """
 Local Social Media Content Generator with Monetization
-(Production-Ready Version with Enhanced Visual Design for Dark and Light Modes)
+(Production-Ready Version with Enhanced Dark Mode Styling)
 """
 
 import os
@@ -93,33 +93,21 @@ from passlib.hash import bcrypt
 # ----------------------------- Streamlit Configuration -----------------------------
 st.set_page_config(page_title="🚀 Social Media Content Generator", layout="wide")
 
-# ----------------------------- Custom CSS for Dark/Light Modes -----------------------------
+# ----------------------------- Custom CSS for Enhanced Dark Mode Styling -----------------------------
 st.markdown(
     """
     <style>
-    /* Define CSS variables for light mode */
+    /* Define a dark theme palette that works well for readability */
     :root {
-        --primary-color: #007bff;
-        --background-color: #f8f9fa;
-        --secondary-background: #ffffff;
-        --text-color: #212529;
-        --sidebar-bg: #343a40;
-        --sidebar-text: #ffffff;
+        --primary-color: #2196F3; /* A medium blue for primary buttons */
+        --background-color: #263238; /* Dark blue-grey background */
+        --secondary-background: #37474F; /* Slightly lighter dark background for cards */
+        --text-color: #ECEFF1; /* Light grey text */
+        --sidebar-bg: #37474F; /* Sidebar background matching card background */
+        --sidebar-text: #ECEFF1; /* Sidebar text color */
     }
 
-    /* Override variables for dark mode using media query */
-    @media (prefers-color-scheme: dark) {
-        :root {
-            --primary-color: #66b2ff;
-            --background-color: #0e1117;
-            --secondary-background: #1e2228;
-            --text-color: #e0e0e0;
-            --sidebar-bg: #212529;
-            --sidebar-text: #e0e0e0;
-        }
-    }
-
-    /* Apply background to the main container */
+    /* Apply the background color to the main container */
     .reportview-container {
         background: var(--background-color);
     }
@@ -144,20 +132,22 @@ st.markdown(
         font-size: 16px;
     }
     .stButton button:hover {
-        background-color: #0056b3;
+        background-color: #1976D2;
     }
 
     /* Text input styling */
     .stTextInput > div > input {
-        border: 1px solid #ced4da;
+        border: 1px solid #90A4AE;
         border-radius: 4px;
         padding: 0.5em;
+        color: var(--text-color);
+        background: var(--secondary-background);
     }
 
     /* Metric card styling */
     .metric-card {
         text-align: center;
-        border: 1px solid #e6e6e6;
+        border: 1px solid #90A4AE;
         padding: 15px;
         border-radius: 10px;
         background: var(--secondary-background);
@@ -748,10 +738,10 @@ def render_dashboard(metrics, thresholds):
                     <img src="{icon_url}" alt="{label}" style="width:50px; height:50px; margin-bottom:10px;" />
                     <h3 style="margin: 5px 0;">{label}</h3>
                     <p style="margin: 5px 0; font-size: 18px;">{current} / {total}</p>
-                    <div style="height: 20px; background-color: #f3f3f3; border-radius: 10px;">
+                    <div style="height: 20px; background-color: #90A4AE; border-radius: 10px;">
                         <div style="width: {min(current / total * 100, 100)}%; background-color: {progress_color}; height: 100%; border-radius: 10px;"></div>
                     </div>
-                    <p style="margin: 5px 0; font-size: 14px; color: gray;">{int(current / total * 100)}% Completed</p>
+                    <p style="margin: 5px 0; font-size: 14px;">{int(current / total * 100)}% Completed</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
