@@ -1,19 +1,19 @@
 import sys
 import os
-# Add the parent directory (project root) to sys.path
+# Add the project root to sys.path so that "local.py" can be found.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import pytest
 from local import Base, register_user_local, login_user_local
 
-# For testing, override the database URL
+# For testing, override the database URL.
 TEST_DB_URL = "sqlite:///test.db"
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
-# Import the engine after setting the environment variable
+# Import the engine after setting the environment variable.
 from local import engine
 
-# Reinitialize the test database
+# Reinitialize the test database.
 Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
