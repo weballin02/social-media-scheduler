@@ -2,6 +2,10 @@
 import os
 import pytest
 from local import Base, register_user_local, login_user_local
+from local import download_image
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Override the database URL for testing
 TEST_DB_URL = "sqlite:///test.db"
