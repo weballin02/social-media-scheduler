@@ -1,6 +1,6 @@
 """
 Local Social Media Content Generator with Monetization
-(Production-Ready Version with Enhanced Visual Design and Updated Authentication UI)
+(Production-Ready Version with Enhanced Visual Design for Dark and Light Modes)
 """
 
 import os
@@ -93,24 +93,50 @@ from passlib.hash import bcrypt
 # ----------------------------- Streamlit Configuration -----------------------------
 st.set_page_config(page_title="🚀 Social Media Content Generator", layout="wide")
 
-# ----------------------------- Custom CSS for Enhanced Visual Appeal -----------------------------
+# ----------------------------- Custom CSS for Dark/Light Modes -----------------------------
 st.markdown(
     """
     <style>
-    /* Global background for the main container */
-    .reportview-container {
-        background: #f8f9fa;
+    /* Define CSS variables for light mode */
+    :root {
+        --primary-color: #007bff;
+        --background-color: #f8f9fa;
+        --secondary-background: #ffffff;
+        --text-color: #212529;
+        --sidebar-bg: #343a40;
+        --sidebar-text: #ffffff;
     }
+
+    /* Override variables for dark mode using media query */
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --primary-color: #66b2ff;
+            --background-color: #0e1117;
+            --secondary-background: #1e2228;
+            --text-color: #e0e0e0;
+            --sidebar-bg: #212529;
+            --sidebar-text: #e0e0e0;
+        }
+    }
+
+    /* Apply background to the main container */
+    .reportview-container {
+        background: var(--background-color);
+    }
+
     /* Sidebar styling */
     [data-testid="stSidebar"] {
-        background: #343a40;
+        background: var(--sidebar-bg);
     }
-    [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] label {
-        color: #ffffff;
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] label {
+        color: var(--sidebar-text);
     }
+
     /* Button styling */
     .stButton button {
-        background-color: #007bff;
+        background-color: var(--primary-color);
         color: white;
         border: none;
         border-radius: 4px;
@@ -120,19 +146,22 @@ st.markdown(
     .stButton button:hover {
         background-color: #0056b3;
     }
+
     /* Text input styling */
-    .stTextInput>div>input {
+    .stTextInput > div > input {
         border: 1px solid #ced4da;
         border-radius: 4px;
         padding: 0.5em;
     }
+
     /* Metric card styling */
     .metric-card {
         text-align: center;
         border: 1px solid #e6e6e6;
         padding: 15px;
         border-radius: 10px;
-        background: white;
+        background: var(--secondary-background);
+        color: var(--text-color);
     }
     </style>
     """,
