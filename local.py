@@ -1,6 +1,6 @@
 """
 Local Social Media Content Generator with Monetization
-(Production-Ready Version with Enhanced Dark Mode Styling)
+(Production-Ready Version with Enhanced Visual Design using Option 2 Palette)
 """
 
 import os
@@ -93,21 +93,27 @@ from passlib.hash import bcrypt
 # ----------------------------- Streamlit Configuration -----------------------------
 st.set_page_config(page_title="🚀 Social Media Content Generator", layout="wide")
 
-# ----------------------------- Custom CSS for Enhanced Dark Mode Styling -----------------------------
+# ----------------------------- Custom CSS for Option 2 Palette -----------------------------
 st.markdown(
     """
     <style>
-    /* Define a dark theme palette that works well for readability */
     :root {
-        --primary-color: #2196F3; /* A medium blue for primary buttons */
-        --background-color: #263238; /* Dark blue-grey background */
-        --secondary-background: #37474F; /* Slightly lighter dark background for cards */
-        --text-color: #ECEFF1; /* Light grey text */
-        --sidebar-bg: #37474F; /* Sidebar background matching card background */
-        --sidebar-text: #ECEFF1; /* Sidebar text color */
+        /* Primary color for main navigation and primary buttons */
+        --primary-color: #5B4CF5;
+        /* Secondary color for interactive elements, hover states, etc. */
+        --secondary-color: #2E7DFF;
+        /* Accent colors for success and error states */
+        --success-color: #10B981;
+        --error-color: #FF7070;
+        /* Background and card colors optimized for a dark design */
+        --background-color: #121212;
+        --card-background: #1E1E1E;
+        --text-color: #E0E0E0;
+        --sidebar-bg: #1E1E1E;
+        --sidebar-text: #E0E0E0;
     }
 
-    /* Apply the background color to the main container */
+    /* Main container background */
     .reportview-container {
         background: var(--background-color);
     }
@@ -132,25 +138,25 @@ st.markdown(
         font-size: 16px;
     }
     .stButton button:hover {
-        background-color: #1976D2;
+        background-color: var(--secondary-color);
     }
 
     /* Text input styling */
     .stTextInput > div > input {
-        border: 1px solid #90A4AE;
+        border: 1px solid #444;
         border-radius: 4px;
         padding: 0.5em;
         color: var(--text-color);
-        background: var(--secondary-background);
+        background: var(--card-background);
     }
 
     /* Metric card styling */
     .metric-card {
         text-align: center;
-        border: 1px solid #90A4AE;
+        border: 1px solid #444;
         padding: 15px;
         border-radius: 10px;
-        background: var(--secondary-background);
+        background: var(--card-background);
         color: var(--text-color);
     }
     </style>
