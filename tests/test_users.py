@@ -1,7 +1,7 @@
 # tests/test_users.py
 import os
 import pytest
-from app import Base, register_user_local, login_user_local
+from local import Base, register_user_local, login_user_local
 
 # Override the database URL for testing
 TEST_DB_URL = "sqlite:///test.db"
